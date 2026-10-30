@@ -89,6 +89,9 @@ def _quality_gate(image: Image.Image) -> tuple[bool, str]:
     width, height = image.size
     if min(width, height) < 256:
         return False, "The shorter side is below the 256 pixel quality threshold."
+    quality = _jpeg_quality(image)
+    if quality is not None and quality < 60:
+        return False, "The estimated JPEG quality is below the 60 quality threshold."
     return True, ""
 
 

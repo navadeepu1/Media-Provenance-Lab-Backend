@@ -43,3 +43,11 @@ def test_missing_thumbnail_is_explicit():
     image.save(output, "JPEG")
     raw = output.getvalue()
     assert provenance(Image.open(io.BytesIO(raw)), raw)["embedded_thumbnail"] == "absent"
+
+
+def test_low_quality_jpeg_has_quality_estimate():
+    image = Image.new("RGB", (640, 480), "white")
+    output = io.BytesIO()
+    image.save(output, "JPEG", quality=30)
+    result = provenance(Image.open(io.BytesIO(output.getvalue())), output.getvalue())
+    assert result["jpeg_quality_estimate"] < 60
