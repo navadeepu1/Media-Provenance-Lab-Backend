@@ -9,7 +9,7 @@ The local foundation, SQLite job/report persistence, chunked upload handling, se
 5. **Detector**: select a permissively licensed small ONNX model, record licence/revision/SHA-256, add lazy loading, calibration, timeout, and missing-weight behavior.
 6. **Known items**: add database seed records, pHash/dHash threshold matching, reproducible synthetic seed generation, and UI context cards.
 7. **Video**: sample one frame per second up to 30 frames, aggregate frame tiers at the 10% boundary, and return strongest-frame thumbnails.
-8. **Explainer**: add provider adapters, JSON-only prompt construction, strict output validation, timeout fallback, and SQLite-backed explanation cache.
+8. **Explainer**: template fallback and strict JSON-output validation are present; add Gemini/Groq provider adapters, an 8-second timeout, and SQLite-backed explanation cache. Provider keys belong only in private Render environment variables.
 9. **API/security**: add CORS allowlisting, request IDs, security headers, IP rate limiting, strict expiration semantics, scheduled cleanup, and a complete admin test matrix.
 10. **Demo/evaluation**: generate eight fixed-seed samples, build the licensed evaluation manifest and split, produce `eval/results.json`, and ensure README numbers are read from that file.
 11. **UI/accessibility**: render provenance and known-item sections, video frames, interrupted/expired states, and test keyboard/focus behavior at 360px.
