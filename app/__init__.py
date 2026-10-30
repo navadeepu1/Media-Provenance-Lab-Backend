@@ -1,0 +1,2 @@
+"""Media Provenance Lab application."""
+

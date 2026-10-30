@@ -1,0 +1,15 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
+eval_data/
+*.db
+*.sqlite
+*.log
+

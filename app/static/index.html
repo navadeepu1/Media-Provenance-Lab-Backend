@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Media Provenance Lab</title><link rel="stylesheet" href="/static/styles.css"></head>
+<body>
+<main>
+<header><p class="eyebrow">Media Provenance Lab</p><h1>Evidence, not verdicts.</h1>
+<p>Inspect a photo or short video with provenance context and pixel-forensic signals. The report never labels media as “fake” or “real.”</p></header>
+<section aria-labelledby="samples-heading"><h2 id="samples-heading">Try a synthetic demo</h2><div id="samples" class="cards"></div></section>
+<section aria-labelledby="upload-heading"><h2 id="upload-heading">Upload media</h2>
+<form id="upload-form"><label for="file">JPEG, PNG, WebP, or MP4 (up to 25 MB)</label><input id="file" name="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4" required><button>Analyze upload</button></form></section>
+<section id="progress" hidden aria-live="polite"><h2>Analysis progress</h2><p id="progress-text"></p><progress id="progress-bar" max="100" value="0"></progress></section>
+<section id="report" hidden aria-labelledby="report-heading"><h2 id="report-heading">Evidence report</h2><div id="report-content"></div></section>
+<footer><a href="/api/v1/methodology">Methodology and metrics</a></footer>
+</main><script src="/static/app.js"></script>
+</body></html>
+
