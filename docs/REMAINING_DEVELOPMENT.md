@@ -1,10 +1,10 @@
 # Remaining development requirements
 
-The local foundation and SQLite job/report persistence are implemented. The following work is still required before the challenge definition of done can be claimed:
+The local foundation, SQLite job/report persistence, chunked upload handling, security headers, provenance context, embedded-thumbnail inspection, and the JPEG quality gate are implemented. The following work is still required before the challenge definition of done can be claimed:
 
 1. **Exact challenge metadata and repository submission**: obtain the official vertical, track, branch, and judging document; replace the README assumption; push `main` to the public GitHub repository.
-2. **Ingest hardening**: stream multipart uploads in chunks, validate WebP and MP4 signatures separately, inspect headers before pixel decode, probe MP4 duration with OpenCV, and add 413/415/422 regression tests.
-3. **Provenance**: implement piexif thumbnail extraction/comparison, JPEG quantization quality estimates, messaging-copy context, and a tested C2PA capability check.
+2. **Ingest hardening**: inspect headers before pixel decode and add the remaining 413/415/422 regression tests for decode bombs, corrupt media, and codec edge cases.
+3. **Provenance**: add a tested C2PA capability check and expand embedded-thumbnail fixtures; EXIF redaction, quantization estimates, messaging-copy context, and thumbnail comparison are present.
 4. **Forensics**: implement tiled ELA/noise processing, contiguous-region validation, copy-move offset clustering, and generated fixture tests.
 5. **Detector**: select a permissively licensed small ONNX model, record licence/revision/SHA-256, add lazy loading, calibration, timeout, and missing-weight behavior.
 6. **Known items**: add database seed records, pHash/dHash threshold matching, reproducible synthetic seed generation, and UI context cards.
