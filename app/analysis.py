@@ -12,6 +12,7 @@ import piexif
 from PIL import Image, ImageChops, ImageFilter, ExifTags
 
 from .config import settings
+from .explainer import explain
 from .fusion import fuse
 from .schemas import Report, Signal
 
@@ -194,13 +195,18 @@ def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Re
     heatmaps = [{"name": s.evidence["heatmap"], "description": f"{s.name} heatmap; brighter regions show higher relative response."}
                 for s in signals if "heatmap" in s.evidence]
     limitations = [item for s in signals for item in s.limitations]
-    explanation = ("The report is based on deterministic pixel checks. " +
-                   " ".join(f"{s.name}: {s.reason}" for s in signals[:3]) +
-                   " Limitations: " + " ".join(limitations[:2]))
+    explanation_input = {
+        "tier": tier,
+        "rule_id": rule,
+        "signals": [{"name": s.name, "strength": s.strength, "score": s.score, "reason": s.reason}
+                    for s in signals],
+        "limitations": limitations,
+    }
+    explanation, explanation_source = explain(explanation_input)
     return Report(report_id=report_id, tier=tier, applied_rule=rule, signals=signals,
                   provenance=provenance(image, raw), known_item_matches=[],
-                  limitations=limitations, explanation=explanation[:1000],
-                  explanation_source="template", heatmaps=heatmaps,
+                  limitations=limitations, explanation=explanation,
+                  explanation_source=explanation_source, heatmaps=heatmaps,
                   reverse_search=[{"name": "Google Lens", "url": "https://lens.google.com/"},
                                   {"name": "TinEye", "url": "https://tineye.com/"},
                                   {"name": "Yandex Images", "url": "https://yandex.com/images/"}],
