@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
+import cv2
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -18,6 +19,24 @@ from .db import cleanup_expired, create_job, init_db, job_dict, load_report, rec
 from .schemas import Report, Sample
 
 app = FastAPI(title="Media Provenance Lab", docs_url=None, redoc_url=None)
+
+
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if request.url.path == "/":
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; "
+            "img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'"
+        )
+    elif request.url.path.startswith("/api/"):
+        response.headers["Content-Security-Policy"] = "default-src 'none'"
+    return response
+
+
 samples = [
     Sample(id="clean", title="Clean photo", description="Synthetic clean scene."),
     Sample(id="forwarded", title="Forwarded photo", description="Synthetic re-encoded scene."),
@@ -77,6 +96,36 @@ async def begin(raw: bytes, demo: bool = False) -> dict:
     return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}", "status": "queued"}
 
 
+def _media_type(raw: bytes) -> str | None:
+    if raw.startswith(b"\xff\xd8\xff"):
+        return "image"
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image"
+    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
+        return "image"
+    if b"ftyp" in raw[:32] and any(marker in raw[:64] for marker in (b"mp41", b"mp42", b"isom", b"avc1")):
+        return "video"
+    return None
+
+
+def _validate_video(raw: bytes) -> str | None:
+    path = settings.uploads_dir / f"probe-{secrets.token_urlsafe(10)}.mp4"
+    path.write_bytes(raw)
+    capture = cv2.VideoCapture(str(path))
+    try:
+        if not capture.isOpened():
+            return "The file could not be read as a photo or video."
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
+        duration = frames / fps if fps and fps > 0 else 0
+        if duration > 30:
+            return "Video must be 30 seconds or shorter."
+        return None
+    finally:
+        capture.release()
+        path.unlink(missing_ok=True)
+
+
 @app.get("/api/v1/health")
 async def health() -> dict:
     return {"database": "ok", "detector": "not_loaded", "c2pa": "not_checked",
@@ -91,11 +140,27 @@ async def get_samples() -> list[Sample]:
 
 @app.post("/api/v1/analyze", status_code=202)
 async def analyze(file: Annotated[UploadFile, File(...)]) -> dict:
-    raw = await file.read(settings.max_video_bytes + 1)
-    if len(raw) > settings.max_video_bytes:
-        return error("file_too_large", "The file is larger than the allowed limit.", 413)
-    if not raw.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"RIFF")):
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > settings.max_video_bytes:
+            return error("file_too_large", "The file is larger than the allowed limit.", 413)
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    media_type = _media_type(raw)
+    if not media_type:
         return error("invalid_file_type", "Upload a JPEG, PNG, WebP, or MP4 file.", 415)
+    limit = settings.max_video_bytes if media_type == "video" else settings.max_image_bytes
+    if len(raw) > limit:
+        return error("file_too_large", "The file is larger than the allowed limit.", 413)
+    if media_type == "video":
+        video_error = _validate_video(raw)
+        if video_error:
+            return error("validation_error", video_error, 422)
     return await begin(raw)
 
 

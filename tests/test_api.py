@@ -37,3 +37,11 @@ def test_invalid_magic_is_rejected():
     with TestClient(app) as client:
         response = client.post("/api/v1/analyze", files={"file": ("sample.jpg", b"not an image", "image/jpeg")})
         assert response.status_code == 415
+
+
+def test_security_headers_and_admin_configuration():
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert "default-src 'none'" in response.headers["content-security-policy"]
+        assert client.post("/api/v1/admin/cleanup").status_code == 503
