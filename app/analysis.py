@@ -15,6 +15,11 @@ from .config import settings
 from .explainer import explain
 from .fusion import fuse
 from .schemas import Report, Signal
+from .detector import run_learned_detector
+
+# Keep False until the detector is calibrated on the validation split and the
+# decision is recorded in docs/METHODOLOGY.md.
+LEARNED_COUNTS_IN_TIER = False
 
 
 def _strength(score: float | None, low: float = 0.35, high: float = 0.70) -> str:
@@ -188,11 +193,13 @@ def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Re
     else:
         signals.append(Signal(name="Quality gate", family="compression", strength="not_determined",
                               reason=reason, limitations=["Higher quality media is needed for pixel forensics."]))
-    signals.append(Signal(name="Learned detector", family="learned", strength="not_determined",
-                          reason="Verified ONNX detector weights are not installed.",
-                          limitations=["The learned detector is optional and is not used to assign a tier."]))
-    tier, rule = fuse(signals)
-    heatmaps = [{"name": s.evidence["heatmap"], "description": f"{s.name} heatmap; brighter regions show higher relative response."}
+    learned = Signal.model_validate(run_learned_detector(image))
+    signals.append(learned)
+    tier, rule = fuse(
+        signals if LEARNED_COUNTS_IN_TIER else [s for s in signals if s.family != "learned"]
+    )
+    heatmaps = [{"name": s.evidence["heatmap"],
+                 "description": f"{s.name} heatmap; brighter regions show higher relative response."}
                 for s in signals if "heatmap" in s.evidence]
     limitations = [item for s in signals for item in s.limitations]
     explanation_input = {

@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
-
+from .detector import get_detector
 import cv2
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -128,8 +128,12 @@ def _validate_video(raw: bytes) -> str | None:
 
 @app.get("/api/v1/health")
 async def health() -> dict:
-    return {"database": "ok", "detector": "not_loaded", "c2pa": "not_checked",
-            "explainer_provider": settings.ai_provider, "pipeline_version": "1.0.0",
+    detector = get_detector()
+    return {"database": "ok",
+            "detector": detector.status if detector else "disabled",
+            "c2pa": "not_checked",
+            "explainer_provider": settings.ai_provider,
+            "pipeline_version": "1.0.0",
             "last_startup": time.time()}
 
 

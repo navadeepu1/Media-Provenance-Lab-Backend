@@ -12,8 +12,9 @@ class Settings(BaseSettings):
     hf_token: str = ""
     detector_repo: str = ""
     detector_revision: str = ""
+    detector_local_path: str = "model_int8.onnx"
     detector_filename: str = "model_int8.onnx"
-    detector_sha256: str = ""
+    detector_sha256: str = "C58229F69570BE40698120B31DEFD985C63904575BAACFFAD1A7866FDA6EFCC5"
     job_budget_seconds: int = 90
     max_image_bytes: int = 10 * 1024 * 1024
     max_video_bytes: int = 25 * 1024 * 1024

@@ -35,7 +35,7 @@ Use Python 3.12, create a virtual environment, install `requirements-dev.txt`, t
 uvicorn app.main:app --reload
 ```
 
-Open `http://127.0.0.1:8000`. The app works offline with no keys; the optional learned detector and explainer are not required.
+Open `http://127.0.0.1:8000`. The app works offline with no provider keys. To enable the local learned detector, keep `model_int8.onnx` in the project root and set `DETECTOR_LOCAL_PATH=model_int8.onnx` in `.env`; detector failures remain `not_determined`.
 
 ## Deploy on Render:
 

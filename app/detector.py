@@ -5,9 +5,7 @@ returns "not_determined". A failure is never reported as human or clean.
 """
 
 from __future__ import annotations
-
 import hashlib
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -19,13 +17,18 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
+from .config import settings
+from .constants import (
+    DETECTOR_ARTIFICIAL_INDEX,
+    DETECTOR_INPUT_SIZE,
+    DETECTOR_MEAN,
+    DETECTOR_STD,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-INPUT_SIZE = 224
-MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-# Output index 0 = "artificial", index 1 = "human" (from the model's config.json).
-LABELS = ("artificial", "human")
+MEAN = np.array(DETECTOR_MEAN, dtype=np.float32)
+STD = np.array(DETECTOR_STD, dtype=np.float32)
 INFERENCE_TIMEOUT_SECONDS = 15.0
 
 # PROVISIONAL thresholds on the AI probability. Replace them with values chosen
@@ -54,7 +57,9 @@ class DetectorOutput:
 def preprocess(image: Image.Image) -> np.ndarray:
     """Convert to RGB, resize to 224x224 (bicubic), scale to [0, 1], normalise,
     and return an NCHW float32 tensor of shape (1, 3, 224, 224)."""
-    rgb = image.convert("RGB").resize((INPUT_SIZE, INPUT_SIZE), Image.Resampling.BICUBIC)
+    rgb = image.convert("RGB").resize(
+        (DETECTOR_INPUT_SIZE, DETECTOR_INPUT_SIZE), Image.Resampling.BICUBIC
+    )
     x = np.asarray(rgb, dtype=np.float32) / 255.0  # H, W, C
     x = (x - MEAN) / STD
     x = np.transpose(x, (2, 0, 1))                 # C, H, W
@@ -77,10 +82,10 @@ def sha256_of(path: Path) -> str:
 
 def interpret_logits(logits) -> DetectorOutput:
     values = np.asarray(logits, dtype=np.float64).reshape(-1)
-    if values.shape != (len(LABELS),) or not np.all(np.isfinite(values)):
+    if values.shape != (2,) or not np.all(np.isfinite(values)):
         return DetectorOutput("not_determined", reason="Detector returned an unexpected output.")
     probabilities = softmax(values)
-    return DetectorOutput("ok", ai_probability=float(probabilities[LABELS.index("artificial")]))
+    return DetectorOutput("ok", ai_probability=float(probabilities[DETECTOR_ARTIFICIAL_INDEX]))
 
 
 class OnnxDetector:
@@ -165,21 +170,24 @@ def learned_signal(output: DetectorOutput) -> dict:
 
 @lru_cache(maxsize=1)
 def get_detector() -> Optional[OnnxDetector]:
-    raw_path = os.environ.get("DETECTOR_LOCAL_PATH", "").strip()
+    raw_path = settings.detector_local_path.strip()
     if not raw_path:
         return None
     path = Path(raw_path)
     if not path.is_absolute():
         path = PROJECT_ROOT / path
-    expected = os.environ.get("DETECTOR_SHA256", "").strip() or None
+    expected = settings.detector_sha256.strip() or None
     return OnnxDetector(path, expected_sha256=expected)
 
 
 def run_learned_detector(image: Image.Image) -> dict:
-    """Single entry point for the analysis pipeline."""
-    detector = get_detector()
-    if detector is None:
-        output = DetectorOutput("not_determined", reason="Learned detector is not configured.")
-    else:
-        output = detector.predict(image)
+    """Single entry point for the analysis pipeline. Never raises."""
+    try:
+        detector = get_detector()
+        if detector is None:
+            output = DetectorOutput("not_determined", reason="Learned detector is not configured.")
+        else:
+            output = detector.predict(image)
+    except Exception:
+        output = DetectorOutput("not_determined", reason="Learned detector failed unexpectedly.")
     return learned_signal(output)
