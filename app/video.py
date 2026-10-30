@@ -18,6 +18,7 @@ from .config import settings
 MAX_DURATION_SECONDS = 30
 MAX_FRAMES = 30
 MAX_FPS = 240
+MAX_ANALYSIS_SIDE = 1920
 
 
 class VideoError(ValueError):
@@ -96,7 +97,8 @@ def target_indices(info: VideoInfo) -> list[int]:
 
 
 def sample_frames(path: Path, info: VideoInfo) -> Iterator[SampledFrame]:
-    """Yield the target frames in order. Skipped frames are grabbed, not converted."""
+    """Yield the target frames in order. Frames larger than MAX_ANALYSIS_SIDE are
+    scaled down; smaller frames are left unchanged."""
     targets = target_indices(info)
     capture = cv2.VideoCapture(str(path))
     try:
@@ -113,7 +115,9 @@ def sample_frames(path: Path, info: VideoInfo) -> Iterator[SampledFrame]:
                 return
             position += 1
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            yield SampledFrame(index=target, timestamp=target / info.fps, image=Image.fromarray(rgb))
+            image = Image.fromarray(rgb)
+            image.thumbnail((MAX_ANALYSIS_SIDE, MAX_ANALYSIS_SIDE), Image.Resampling.LANCZOS)
+            yield SampledFrame(index=target, timestamp=target / info.fps, image=image)
     finally:
         capture.release()
 
@@ -126,4 +130,3 @@ def validate_bytes(raw: bytes) -> VideoInfo:
             if next(frames, None) is None:
                 raise VideoError("No frames could be decoded. Use an H.264 MP4 file.")
         return info
-    
