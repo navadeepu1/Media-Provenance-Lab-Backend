@@ -8,6 +8,7 @@ from typing import Any
 import cv2
 import imagehash
 import numpy as np
+import piexif
 from PIL import Image, ImageChops, ImageFilter, ExifTags
 
 from .config import settings
@@ -21,10 +22,24 @@ def _strength(score: float | None, low: float = 0.35, high: float = 0.70) -> str
     return "strong" if score >= high else "weak" if score >= low else "none"
 
 
-def provenance(image: Image.Image) -> dict[str, Any]:
+def _jpeg_quality(image: Image.Image) -> int | None:
+    tables = getattr(image, "quantization", None)
+    if not tables or 0 not in tables:
+        return None
+    average = sum(tables[0]) / len(tables[0])
+    if average <= 0:
+        return None
+    return max(1, min(100, round(5000 / average if average > 50 else 100 - average / 2)))
+
+
+def provenance(image: Image.Image, raw: bytes | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"camera_make": None, "camera_model": None,
                               "software": None, "capture_time": None,
-                              "location_data_present": False}
+                              "location_data_present": False,
+                              "jpeg_quality_estimate": _jpeg_quality(image),
+                              "embedded_thumbnail": "not_determined",
+                              "embedded_thumbnail_distance": None,
+                              "messaging_copy_likely": False}
     try:
         exif = image.getexif()
         for key, value in exif.items():
@@ -39,6 +54,32 @@ def provenance(image: Image.Image) -> dict[str, Any]:
                 result["capture_time"] = str(value)
             elif name == "GPSInfo":
                 result["location_data_present"] = True
+        if raw and image.format == "JPEG":
+            try:
+                exif_dict = piexif.load(raw)
+                thumbnail = exif_dict.get("thumbnail")
+                if thumbnail:
+                    embedded = Image.open(io.BytesIO(thumbnail)).convert("RGB")
+                    comparison_size = (min(image.width, 512), min(image.height, 512))
+                    main = image.convert("RGB").resize(comparison_size)
+                    embedded = embedded.resize(comparison_size)
+                    result["embedded_thumbnail_distance"] = int(
+                        imagehash.phash(main) - imagehash.phash(embedded)
+                    )
+                    result["embedded_thumbnail"] = (
+                        "mismatch" if result["embedded_thumbnail_distance"] > 16 else "matches"
+                    )
+                else:
+                    result["embedded_thumbnail"] = "absent"
+            except Exception:
+                result["embedded_thumbnail"] = "not_determined"
+        result["messaging_copy_likely"] = (
+            not result["camera_make"]
+            and not result["camera_model"]
+            and max(image.size) <= 1600
+            and result["jpeg_quality_estimate"] is not None
+            and result["jpeg_quality_estimate"] <= 70
+        )
     except Exception:
         result["exif_error"] = "Metadata could not be read."
     return result
@@ -154,7 +195,7 @@ def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Re
                    " ".join(f"{s.name}: {s.reason}" for s in signals[:3]) +
                    " Limitations: " + " ".join(limitations[:2]))
     return Report(report_id=report_id, tier=tier, applied_rule=rule, signals=signals,
-                  provenance=provenance(image), known_item_matches=[],
+                  provenance=provenance(image, raw), known_item_matches=[],
                   limitations=limitations, explanation=explanation[:1000],
                   explanation_source="template", heatmaps=heatmaps,
                   reverse_search=[{"name": "Google Lens", "url": "https://lens.google.com/"},
