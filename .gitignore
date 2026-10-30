@@ -15,3 +15,7 @@ eval_data/
 *.db
 *.sqlite
 *.log
+*.onnx
+*.pth
+*.safetensors
+
