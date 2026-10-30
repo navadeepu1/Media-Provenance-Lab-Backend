@@ -1,0 +1,7 @@
+DETECTOR_INPUT_SIZE = 224
+DETECTOR_MEAN = (0.485, 0.456, 0.406)
+DETECTOR_STD = (0.229, 0.224, 0.225)
+
+# The detector's output index 0 is artificial and index 1 is human.
+DETECTOR_ARTIFICIAL_INDEX = 0
+DETECTOR_HUMAN_INDEX = 1

@@ -8,8 +8,10 @@ data/*
 !data/.gitkeep
 models/*
 !models/.gitkeep
+detector_source/
+onnx_out/
+model_int8.onnx
 eval_data/
 *.db
 *.sqlite
 *.log
-

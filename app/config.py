@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     groq_api_key: str = ""
     hf_token: str = ""
+    detector_repo: str = ""
+    detector_revision: str = ""
+    detector_filename: str = "model_int8.onnx"
+    detector_sha256: str = ""
     job_budget_seconds: int = 90
     max_image_bytes: int = 10 * 1024 * 1024
     max_video_bytes: int = 25 * 1024 * 1024
@@ -29,4 +33,3 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-
