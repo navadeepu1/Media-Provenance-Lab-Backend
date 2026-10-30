@@ -130,3 +130,15 @@ def test_fake_mp4_header_is_rejected_as_undecodable(isolated):
     with pytest.raises(media.UploadRejected) as info:
         analysis.analyze_bytes(raw)
     assert info.value.code == "validation_error"
+
+def test_large_frames_are_downscaled_for_analysis(isolated):
+    path = isolated / "big.mp4"
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 2, (2048, 1152))
+    for _ in range(2):
+        writer.write(np.full((1152, 2048, 3), 90, dtype=np.uint8))
+    writer.release()
+    with video.workspace(path.read_bytes()) as work:
+        info = video.probe(work)
+        frames = list(video.sample_frames(work, info))
+    assert frames
+    assert max(frames[0].image.size) <= video.MAX_ANALYSIS_SIDE

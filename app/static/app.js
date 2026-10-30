@@ -39,7 +39,7 @@ function escapeHtml(value) { return String(value).replace(/[&<>"']/g, c => ({ "&
 async function loadSamples() {
   const items = await (await fetch("/api/v1/samples")).json();
   samples.innerHTML = items.map(s => `<button class="card" data-id="${s.id}"><strong>${escapeHtml(s.title)}</strong><br><span>${escapeHtml(s.description)}</span></button>`).join("");
-  samples.querySelectorAll("button").forEach(button => button.addEventListener("click", () => start(`/api/v1/samples/${encodeURIComponent(button.dataset.id)}/analyze`)));
+  samples.querySelectorAll("button").forEach(button => button.addEventListener("click", () => start(`/api/v1/samples/${encodeURIComponent(button.dataset.id)}/analyze`, { method: "POST" })));
 }
 document.querySelector("#upload-form").addEventListener("submit", event => {
   event.preventDefault(); const data = new FormData(event.currentTarget);
