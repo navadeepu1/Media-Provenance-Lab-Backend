@@ -1,25 +1,46 @@
+"""Forensic analysis for uploaded photos and videos.
+
+Every module returns a Signal. A module that cannot run returns "not_determined"
+with a reason. It never returns a clean result.
+"""
+
+from __future__ import annotations
+
 import hashlib
 import io
 import math
 import secrets
-from pathlib import Path
+from contextlib import closing
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
 import imagehash
 import numpy as np
 import piexif
-from PIL import Image, ImageChops, ImageFilter, ExifTags
+from PIL import ExifTags, Image, ImageChops
 
+from . import media, video
 from .config import settings
+from .detector import run_learned_detector
 from .explainer import explain
 from .fusion import fuse
 from .schemas import Report, Signal
-from .detector import run_learned_detector
 
 # Keep False until the detector is calibrated on the validation split and the
 # decision is recorded in docs/METHODOLOGY.md.
 LEARNED_COUNTS_IN_TIER = False
+
+STRONG = "STRONG_SIGNALS"
+WEAK = "WEAK_SIGNALS"
+NONE = "NO_SIGNALS"
+INCONCLUSIVE = "INCONCLUSIVE"
+
+REVERSE_SEARCH = [
+    {"name": "Google Lens", "url": "https://lens.google.com/"},
+    {"name": "TinEye", "url": "https://tineye.com/"},
+    {"name": "Yandex Images", "url": "https://yandex.com/images/"},
+]
 
 
 def _strength(score: float | None, low: float = 0.35, high: float = 0.70) -> str:
@@ -101,7 +122,7 @@ def _quality_gate(image: Image.Image) -> tuple[bool, str]:
     return True, ""
 
 
-def _ela(image: Image.Image, derived_dir: Path, stem: str) -> Signal:
+def _ela(image: Image.Image, derived_dir, stem: str) -> Signal:
     try:
         original = image.convert("RGB")
         encoded = io.BytesIO()
@@ -123,7 +144,7 @@ def _ela(image: Image.Image, derived_dir: Path, stem: str) -> Signal:
                       reason=f"ELA could not run: {type(exc).__name__}.")
 
 
-def _noise(image: Image.Image, derived_dir: Path, stem: str) -> Signal:
+def _noise(image: Image.Image, derived_dir, stem: str) -> Signal:
     try:
         arr = np.asarray(image.convert("L"), dtype=np.uint8)
         smooth = cv2.medianBlur(arr, 5)
@@ -140,81 +161,232 @@ def _noise(image: Image.Image, derived_dir: Path, stem: str) -> Signal:
                       reason=f"Noise analysis could not run: {type(exc).__name__}.")
 
 
-def _copy_move(image: Image.Image, derived_dir: Path, stem: str) -> Signal:
+def _copy_move(image: Image.Image) -> Signal:
+    """Find repeated patches. Keypoint pairs count only when many pairs share the
+    same displacement (offset clustering). This version gives a count and an
+    offset, not a region. Region validation is Part B."""
     try:
         gray = np.asarray(image.convert("L"))
-        orb = cv2.ORB_create(nfeatures=1200, fastThreshold=20)
+        orb = cv2.ORB_create(nfeatures=1500, fastThreshold=20)
         keypoints, descriptors = orb.detectAndCompute(gray, None)
-        count = 0
-        if descriptors is not None and len(descriptors) > 12:
+        votes: dict[tuple[int, int], int] = {}
+        if descriptors is not None and len(keypoints) > 12:
             matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
-            pairs = matcher.knnMatch(descriptors, descriptors, k=2)
-            count = sum(1 for pair in pairs if len(pair) == 2 and pair[0].distance < 0.7 * pair[1].distance
-                        and np.linalg.norm(np.array(keypoints[pair[0].queryIdx].pt) -
-                                           np.array(keypoints[pair[0].trainIdx].pt)) > 20)
-        score = min(1.0, count / 20)
-        heat_path = derived_dir / f"{stem}-copy-move.png"
-        Image.fromarray(np.zeros((max(1, gray.shape[0] // 4), max(1, gray.shape[1] // 4)), dtype=np.uint8)).save(heat_path)
-        return Signal(name="Copy-move", family="duplication", strength=_strength(score, .3, .65),
-                      score=score, reason=f"{count} repeated feature relationships passed the ratio test.",
-                      evidence={"heatmap": heat_path.name, "match_count": count},
-                      limitations=["Flat regions and heavy resizing reduce feature matches."])
+            neighbours = matcher.knnMatch(descriptors, descriptors, k=3)
+            for i, candidates in enumerate(neighbours):
+                others = [m for m in candidates if m.trainIdx != i]  # skip the keypoint itself
+                if len(others) < 2:
+                    continue
+                best, second = others[0], others[1]
+                if best.distance >= 0.75 * second.distance:  # ratio test
+                    continue
+                p = np.array(keypoints[i].pt)
+                q = np.array(keypoints[best.trainIdx].pt)
+                dx, dy = q - p
+                if math.hypot(dx, dy) < 20:
+                    continue
+                key = (int(round(dx / 4)), int(round(dy / 4)))  # 4 px bins
+                votes[key] = votes.get(key, 0) + 1
+
+        best_count, best_offset = 0, (0, 0)
+        for bx, by in votes:
+            total = sum(votes.get((bx + i, by + j), 0) for i in (-1, 0, 1) for j in (-1, 0, 1))
+            if total > best_count:
+                best_count, best_offset = total, (bx * 4, by * 4)
+
+        score = min(1.0, best_count / 20)
+        if best_count:
+            reason = (f"{best_count} keypoint pairs share one displacement of about "
+                      f"{best_offset[0]}, {best_offset[1]} pixels.")
+        else:
+            reason = "No keypoint pairs shared a displacement."
+        return Signal(name="Copy-move", family="duplication", strength=_strength(score, 0.5, 0.8),
+                      score=score, reason=reason,
+                      evidence={"match_count": best_count, "offset_px": list(best_offset)},
+                      limitations=["Flat regions and heavy resizing reduce feature matches.",
+                                   "This version reports a count and offset, not a region."])
     except Exception as exc:
         return Signal(name="Copy-move", family="duplication", strength="not_determined",
                       reason=f"Copy-move analysis could not run: {type(exc).__name__}.")
 
 
-def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Report:
-    settings.derived_dir.mkdir(parents=True, exist_ok=True)
-    report_id = secrets.token_urlsafe(24)
-    stem = hashlib.sha256(raw).hexdigest()[:16]
-    if raw[:4] == b"\x00\x00\x00\x18ftyp" or b"ftyp" in raw[:32]:
-        signals = [Signal(name="Video analysis", family="learned", strength="not_determined",
-                          reason="Video frame sampling is available in the API; this build reports the image modules for uploads.",
-                          limitations=["Audio is not analyzed."])]
-        return Report(report_id=report_id, tier="INCONCLUSIVE", applied_rule="R3",
-                      signals=signals, provenance={"media_type": "video"},
-                      known_item_matches=[], limitations=["Video frame aggregation is limited in this deployment."],
-                      explanation="The evidence is inconclusive because the available checks did not determine enough independent families.",
-                      explanation_source="template", heatmaps=[], reverse_search=[], demo=demo)
-    try:
-        image = Image.open(io.BytesIO(raw))
-        image.load()
-    except Exception as exc:
-        raise ValueError("The file could not be read as a photo or video.") from exc
-    if image.width * image.height > settings.max_pixels or max(image.size) > settings.max_image_side:
-        raise ValueError("Image dimensions exceed the configured safety limit.")
+def image_signals(image: Image.Image, stem: str) -> list[Signal]:
+    derived = settings.derived_dir
     ok, reason = _quality_gate(image)
-    signals = []
+    signals: list[Signal] = []
     if ok:
-        signals.extend((_ela(image, settings.derived_dir, stem),
-                        _noise(image, settings.derived_dir, stem),
-                        _copy_move(image, settings.derived_dir, stem)))
+        signals.append(_ela(image, derived, stem))
+        signals.append(_noise(image, derived, stem))
+        signals.append(_copy_move(image))
     else:
         signals.append(Signal(name="Quality gate", family="compression", strength="not_determined",
-                              reason=reason, limitations=["Higher quality media is needed for pixel forensics."]))
-    learned = Signal.model_validate(run_learned_detector(image))
-    signals.append(learned)
-    tier, rule = fuse(
-        signals if LEARNED_COUNTS_IN_TIER else [s for s in signals if s.family != "learned"]
-    )
-    heatmaps = [{"name": s.evidence["heatmap"],
-                 "description": f"{s.name} heatmap; brighter regions show higher relative response."}
-                for s in signals if "heatmap" in s.evidence]
-    limitations = [item for s in signals for item in s.limitations]
-    explanation_input = {
+                              reason=reason,
+                              limitations=["Higher quality media is needed for pixel forensics."]))
+        for name, family in (("ELA", "compression"), ("Noise residual", "noise"),
+                             ("Copy-move", "duplication")):
+            signals.append(Signal(name=name, family=family, strength="not_determined",
+                                  reason="Skipped: the quality gate did not pass.", limitations=[]))
+    signals.append(Signal.model_validate(run_learned_detector(image)))
+    return signals
+
+
+def _fused(signals: list[Signal]) -> tuple[str, str]:
+    counted = signals if LEARNED_COUNTS_IN_TIER else [s for s in signals if s.family != "learned"]
+    return fuse(counted)
+
+
+def _heatmaps(signals: list[Signal]) -> list[dict]:
+    return [{"name": s.evidence["heatmap"],
+             "description": f"{s.name} heatmap; brighter regions show a higher relative response."}
+            for s in signals if "heatmap" in s.evidence]
+
+
+def _collect_limitations(signals: list[Signal]) -> list[str]:
+    return list(dict.fromkeys(item for s in signals for item in s.limitations))
+
+
+def _explanation_input(tier, rule, signals, limitations, extra=None) -> dict:
+    payload = {
         "tier": tier,
         "rule_id": rule,
         "signals": [{"name": s.name, "strength": s.strength, "score": s.score, "reason": s.reason}
                     for s in signals],
         "limitations": limitations,
     }
-    explanation, explanation_source = explain(explanation_input)
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _report(report_id, tier, rule, signals, provenance_data, limitations,
+            explanation, source, demo) -> Report:
     return Report(report_id=report_id, tier=tier, applied_rule=rule, signals=signals,
-                  provenance=provenance(image, raw), known_item_matches=[],
-                  limitations=limitations, explanation=explanation,
-                  explanation_source=explanation_source, heatmaps=heatmaps,
-                  reverse_search=[{"name": "Google Lens", "url": "https://lens.google.com/"},
-                                  {"name": "TinEye", "url": "https://tineye.com/"},
-                                  {"name": "Yandex Images", "url": "https://yandex.com/images/"}],
-                  demo=demo)
+                  provenance=provenance_data, known_item_matches=[], limitations=limitations,
+                  explanation=explanation, explanation_source=source,
+                  heatmaps=_heatmaps(signals),
+                  reverse_search=[dict(item) for item in REVERSE_SEARCH], demo=demo)
+
+
+def _analyze_image(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
+    media.check_image_header(raw)
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image.load()
+    except Exception as exc:
+        raise media.UploadRejected("validation_error", "The file could not be read as a photo.", 422) from exc
+    signals = image_signals(image, stem)
+    tier, rule = _fused(signals)
+    limitations = _collect_limitations(signals)
+    explanation, source = explain(_explanation_input(tier, rule, signals, limitations))
+    return _report(report_id, tier, rule, signals, provenance(image, raw), limitations,
+                   explanation, source, demo)
+
+
+@dataclass(frozen=True)
+class _FrameResult:
+    timestamp: float
+    tier: str
+    rule: str
+    signals: list[Signal]
+
+
+def aggregate_frame_tiers(tiers: list[str]) -> tuple[str, str, int]:
+    """Combine per-frame tiers into one video tier.
+    Returns (tier, rule ID, strong-frame threshold)."""
+    count = len(tiers)
+    if count == 0:
+        return INCONCLUSIVE, "R3", 0
+    threshold = max(2, math.ceil(0.10 * count))
+    strong = tiers.count(STRONG)
+    if strong >= threshold:
+        return STRONG, "R1", threshold
+    if strong or tiers.count(WEAK):
+        return WEAK, "R2", threshold
+    if tiers.count(INCONCLUSIVE) * 2 > count:
+        return INCONCLUSIVE, "R3", threshold
+    return NONE, "R4", threshold
+
+
+def _rank(signal: Signal) -> tuple[bool, float]:
+    return (signal.score is not None, signal.score or 0.0)
+
+
+def _strongest_per_module(frames: list[_FrameResult]) -> list[Signal]:
+    best: dict[str, tuple[_FrameResult, Signal]] = {}
+    for frame in frames:
+        for signal in frame.signals:
+            current = best.get(signal.name)
+            if current is None or _rank(signal) > _rank(current[1]):
+                best[signal.name] = (frame, signal)
+    return [
+        signal.model_copy(update={
+            "reason": f"Strongest sampled frame at {frame.timestamp:.0f} s. {signal.reason or ''}".strip()
+        })
+        for frame, signal in best.values()
+    ]
+
+
+def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
+    frames: list[_FrameResult] = []
+    heatmap_names: set[str] = set()
+    info: video.VideoInfo | None = None
+    try:
+        with video.workspace(raw) as path:
+            info = video.probe(path)
+            with closing(video.sample_frames(path, info)) as sampled_frames:
+                for sampled in sampled_frames:
+                    signals = image_signals(sampled.image, f"{stem}-f{sampled.index}")
+                    tier, rule = _fused(signals)
+                    frames.append(_FrameResult(sampled.timestamp, tier, rule, signals))
+                    heatmap_names.update(h["name"] for h in _heatmaps(signals))
+    except video.VideoError as exc:
+        raise media.UploadRejected("validation_error", str(exc), 422) from exc
+
+    if info is None or not frames:
+        raise media.UploadRejected("validation_error",
+                                   "No frames could be decoded. Use an H.264 MP4 file.", 422)
+
+    tier, rule, threshold = aggregate_frame_tiers([f.tier for f in frames])
+    chosen = _strongest_per_module(frames)
+
+    # Keep heatmaps only for the strongest frames. Delete the rest to save disk space.
+    keep = {h["name"] for h in _heatmaps(chosen)}
+    for name in heatmap_names - keep:
+        (settings.derived_dir / name).unlink(missing_ok=True)
+
+    limitations = [
+        "Only up to 30 frames are sampled, one per second. Edits between sampled frames are not seen.",
+        "Audio is not analyzed.",
+    ]
+    limitations = list(dict.fromkeys(limitations + _collect_limitations(chosen)))
+    strong_frames = sum(f.tier == STRONG for f in frames)
+
+    provenance_data = {
+        "media_type": "video",
+        "duration_seconds": round(info.duration, 2),
+        "frames_per_second": round(info.fps, 2),
+        "frames_analysed": len(frames),
+        "sample_interval_seconds": 1,
+        "strong_frame_threshold": threshold,
+        "strong_frames": strong_frames,
+        "frame_tiers": [{"timestamp_seconds": round(f.timestamp, 2), "tier": f.tier} for f in frames],
+    }
+    explanation, source = explain(_explanation_input(
+        tier, rule, chosen, limitations,
+        extra={"frames": {"analysed": len(frames), "strong": strong_frames, "threshold": threshold}},
+    ))
+    return _report(report_id, tier, rule, chosen, provenance_data, limitations,
+                   explanation, source, demo)
+
+
+def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Report:
+    settings.derived_dir.mkdir(parents=True, exist_ok=True)
+    media_type = media.sniff_media_type(raw)
+    if media_type is None:
+        raise media.UploadRejected("invalid_file_type", "Upload a JPEG, PNG, WebP, or MP4 file.", 415)
+    media.check_size(raw, media_type)
+    report_id = secrets.token_urlsafe(24)
+    stem = hashlib.sha256(raw).hexdigest()[:16]
+    if media_type == "video":
+        return _analyze_video(raw, report_id, stem, demo)
+    return _analyze_image(raw, report_id, stem, demo)

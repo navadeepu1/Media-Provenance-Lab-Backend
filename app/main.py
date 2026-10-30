@@ -6,19 +6,38 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
-from .detector import get_detector
-import cv2
-from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+
+from fastapi import FastAPI, File, Header, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
+from . import media, video
 from .analysis import analyze_bytes
 from .config import settings
-from .db import cleanup_expired, create_job, init_db, job_dict, load_report, recover_interrupted_jobs, save_report, update_job
+from .db import (
+    cleanup_expired,
+    create_job,
+    init_db,
+    job_dict,
+    load_report,
+    recover_interrupted_jobs,
+    save_report,
+    update_job,
+)
+from .detector import get_detector
 from .schemas import Report, Sample
 
 app = FastAPI(title="Media Provenance Lab", docs_url=None, redoc_url=None)
+
+
+def error(code: str, message: str, status: int) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message, "details": []}}, status_code=status)
+
+
+@app.exception_handler(media.UploadRejected)
+async def upload_rejected(request: Request, exc: media.UploadRejected) -> JSONResponse:
+    return error(exc.code, exc.message, exc.status)
 
 
 @app.middleware("http")
@@ -64,10 +83,6 @@ async def startup() -> None:
             sample_bytes[sample.id] = buf.getvalue()
 
 
-def error(code: str, message: str, status: int) -> JSONResponse:
-    return JSONResponse({"error": {"code": code, "message": message, "details": []}}, status_code=status)
-
-
 async def run_job(job_id: str, raw: bytes, demo: bool) -> None:
     try:
         for module in ("ingest", "provenance", "pixel forensics", "fusion", "explanation"):
@@ -96,36 +111,6 @@ async def begin(raw: bytes, demo: bool = False) -> dict:
     return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}", "status": "queued"}
 
 
-def _media_type(raw: bytes) -> str | None:
-    if raw.startswith(b"\xff\xd8\xff"):
-        return "image"
-    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image"
-    if raw.startswith(b"RIFF") and raw[8:12] == b"WEBP":
-        return "image"
-    if b"ftyp" in raw[:32] and any(marker in raw[:64] for marker in (b"mp41", b"mp42", b"isom", b"avc1")):
-        return "video"
-    return None
-
-
-def _validate_video(raw: bytes) -> str | None:
-    path = settings.uploads_dir / f"probe-{secrets.token_urlsafe(10)}.mp4"
-    path.write_bytes(raw)
-    capture = cv2.VideoCapture(str(path))
-    try:
-        if not capture.isOpened():
-            return "The file could not be read as a photo or video."
-        fps = capture.get(cv2.CAP_PROP_FPS)
-        frames = capture.get(cv2.CAP_PROP_FRAME_COUNT)
-        duration = frames / fps if fps and fps > 0 else 0
-        if duration > 30:
-            return "Video must be 30 seconds or shorter."
-        return None
-    finally:
-        capture.release()
-        path.unlink(missing_ok=True)
-
-
 @app.get("/api/v1/health")
 async def health() -> dict:
     detector = get_detector()
@@ -142,29 +127,33 @@ async def get_samples() -> list[Sample]:
     return samples
 
 
+async def _read_upload(file: UploadFile) -> bytes:
+    """Read the upload in chunks. This is a helper, not a route."""
+    limit = max(settings.max_image_bytes, settings.max_video_bytes)
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(1024 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise media.UploadRejected("file_too_large", "The file is larger than the allowed limit.", 413)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 @app.post("/api/v1/analyze", status_code=202)
 async def analyze(file: Annotated[UploadFile, File(...)]) -> dict:
-    chunks: list[bytes] = []
-    size = 0
-    while True:
-        chunk = await file.read(1024 * 1024)
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > settings.max_video_bytes:
-            return error("file_too_large", "The file is larger than the allowed limit.", 413)
-        chunks.append(chunk)
-    raw = b"".join(chunks)
-    media_type = _media_type(raw)
-    if not media_type:
-        return error("invalid_file_type", "Upload a JPEG, PNG, WebP, or MP4 file.", 415)
-    limit = settings.max_video_bytes if media_type == "video" else settings.max_image_bytes
-    if len(raw) > limit:
-        return error("file_too_large", "The file is larger than the allowed limit.", 413)
-    if media_type == "video":
-        video_error = _validate_video(raw)
-        if video_error:
-            return error("validation_error", video_error, 422)
+    raw = await _read_upload(file)
+    media_type = media.sniff_media_type(raw)
+    if media_type is None:
+        raise media.UploadRejected("invalid_file_type", "Upload a JPEG, PNG, WebP, or MP4 file.", 415)
+    media.check_size(raw, media_type)
+    try:
+        if media_type == "image":
+            media.check_image_header(raw)
+        else:
+            await asyncio.to_thread(video.validate_bytes, raw)
+    except video.VideoError as exc:
+        raise media.UploadRejected("validation_error", str(exc), 422) from exc
     return await begin(raw)
 
 
@@ -210,12 +199,17 @@ async def export_report(report_id: str) -> Response:
     report = Report.model_validate(payload) if payload else None
     if not report:
         return error("not_found", "Report not found.", 404)
-    rows = "".join(f"<tr><td>{html.escape(s.name)}</td><td>{s.strength}</td><td>{s.score}</td><td>{html.escape(s.reason)}</td></tr>" for s in report.signals)
+    rows = "".join(
+        f"<tr><td>{html.escape(s.name)}</td><td>{s.strength}</td><td>{s.score}</td>"
+        f"<td>{html.escape(s.reason or '')}</td></tr>"
+        for s in report.signals
+    )
     body = f"""<!doctype html><meta charset="utf-8"><title>Media Provenance Report</title>
 <style>body{{font:16px sans-serif;max-width:900px;margin:2rem auto}}th,td{{padding:.5rem;border:1px solid #ccc}}</style>
 <h1>Evidence report</h1><h2>{report.tier} ({report.applied_rule})</h2><p>{html.escape(report.explanation)}</p>
 <table><tr><th>Module</th><th>Strength</th><th>Score</th><th>Reason</th></tr>{rows}</table>"""
-    return Response(body, media_type="text/html", headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
+    return Response(body, media_type="text/html",
+                    headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
 
 
 @app.get("/api/v1/methodology")
