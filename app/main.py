@@ -1,9 +1,9 @@
 import asyncio
-import base64
 import html
 import io
 import secrets
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -14,11 +14,10 @@ from PIL import Image
 
 from .analysis import analyze_bytes
 from .config import settings
+from .db import cleanup_expired, create_job, init_db, job_dict, load_report, recover_interrupted_jobs, save_report, update_job
 from .schemas import Report, Sample
 
 app = FastAPI(title="Media Provenance Lab", docs_url=None, redoc_url=None)
-reports: dict[str, Report] = {}
-jobs: dict[str, dict] = {}
 samples = [
     Sample(id="clean", title="Clean photo", description="Synthetic clean scene."),
     Sample(id="forwarded", title="Forwarded photo", description="Synthetic re-encoded scene."),
@@ -36,6 +35,8 @@ async def startup() -> None:
     settings.data_dir.mkdir(exist_ok=True)
     settings.uploads_dir.mkdir(exist_ok=True)
     settings.derived_dir.mkdir(exist_ok=True)
+    init_db()
+    recover_interrupted_jobs()
     for sample in samples:
         if sample.id not in sample_bytes:
             image = Image.new("RGB", (640, 480), (50 + len(sample.id) * 7 % 150, 100, 160))
@@ -51,22 +52,27 @@ def error(code: str, message: str, status: int) -> JSONResponse:
 async def run_job(job_id: str, raw: bytes, demo: bool) -> None:
     try:
         for module in ("ingest", "provenance", "pixel forensics", "fusion", "explanation"):
-            jobs[job_id].update(current_module=module, progress=min(90, jobs[job_id]["progress"] + 18))
+            current = job_dict(job_id) or {"progress": 0}
+            update_job(job_id, current_module=module, progress=min(90, current["progress"] + 18))
             await asyncio.sleep(0)
         report = await asyncio.to_thread(analyze_bytes, raw, demo=demo)
-        reports[report.report_id] = report
-        jobs[job_id].update(status="done", progress=100, report_id=report.report_id, finished_at=time.time())
+        save_report(report.model_dump(), job_id)
+        update_job(job_id, status="done", progress=100, report_id=report.report_id,
+                   finished_at=datetime.now(timezone.utc))
     except ValueError as exc:
-        jobs[job_id].update(status="failed", error_code="validation_error", error_message=str(exc), finished_at=time.time())
+        update_job(job_id, status="failed", error_code="validation_error",
+                   error_message=str(exc), finished_at=datetime.now(timezone.utc))
     except Exception:
-        jobs[job_id].update(status="failed", error_code="internal_error", finished_at=time.time())
+        update_job(job_id, status="failed", error_code="internal_error",
+                   finished_at=datetime.now(timezone.utc))
 
 
 async def begin(raw: bytes, demo: bool = False) -> dict:
     job_id = secrets.token_urlsafe(18)
-    jobs[job_id] = {"job_id": job_id, "status": "queued", "current_module": "queued",
-                    "progress": 0, "report_id": None, "error_code": None}
-    jobs[job_id]["status"] = "running"
+    path = settings.uploads_dir / f"{job_id}.bin"
+    path.write_bytes(raw)
+    create_job(job_id, path, demo)
+    update_job(job_id, status="running")
     asyncio.create_task(run_job(job_id, raw, demo))
     return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}", "status": "queued"}
 
@@ -102,22 +108,25 @@ async def analyze_sample(sample_id: str) -> dict:
 
 @app.get("/api/v1/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
-    if job_id not in jobs:
+    job = job_dict(job_id)
+    if not job:
         return error("not_found", "Job not found.", 404)
-    return jobs[job_id]
+    job["job_id"] = job.pop("id")
+    return job
 
 
 @app.get("/api/v1/reports/{report_id}")
 async def get_report(report_id: str) -> Report:
-    report = reports.get(report_id)
-    if not report:
+    payload = load_report(report_id)
+    if not payload:
         return error("not_found", "Report not found.", 404)
-    return report
+    return Report.model_validate(payload)
 
 
 @app.get("/api/v1/reports/{report_id}/heatmaps/{name}")
 async def get_heatmap(report_id: str, name: str) -> Response:
-    report = reports.get(report_id)
+    payload = load_report(report_id)
+    report = Report.model_validate(payload) if payload else None
     if not report or "/" in name or "\\" in name or name not in {h["name"] for h in report.heatmaps}:
         return error("not_found", "Heatmap not found.", 404)
     path = settings.derived_dir / name
@@ -128,7 +137,8 @@ async def get_heatmap(report_id: str, name: str) -> Response:
 
 @app.get("/api/v1/reports/{report_id}/export")
 async def export_report(report_id: str) -> Response:
-    report = reports.get(report_id)
+    payload = load_report(report_id)
+    report = Report.model_validate(payload) if payload else None
     if not report:
         return error("not_found", "Report not found.", 404)
     rows = "".join(f"<tr><td>{html.escape(s.name)}</td><td>{s.strength}</td><td>{s.score}</td><td>{html.escape(s.reason)}</td></tr>" for s in report.signals)
@@ -146,6 +156,15 @@ async def methodology() -> dict:
                       "R4": "At least two determined families and all none"},
             "thresholds": {"strong": 0.70, "weak": 0.35}, "metrics": {},
             "limitations": ["Detector weights are not bundled.", "C2PA is not checked in this deployment."]}
+
+
+@app.post("/api/v1/admin/cleanup")
+async def admin_cleanup(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    if not settings.admin_api_key:
+        return error("service_unavailable", "Cleanup is not configured.", 503)
+    if not x_admin_key or not secrets.compare_digest(x_admin_key, settings.admin_api_key):
+        return error("unauthorized", "The admin key is not valid.", 401)
+    return cleanup_expired()
 
 
 @app.get("/")

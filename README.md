@@ -77,7 +77,7 @@ CI runs the same test suite on every push. Coverage exclusions are not configure
 
 ## Security and Privacy Notes
 
-Uploads are capped and checked by magic bytes. Client filenames are ignored. GPS coordinates are never returned, and the optional explainer receives only report JSON. This initial build keeps short-lived reports in process memory; production deployment should add the specified TTL-backed persistence before public judging.
+Uploads are capped and checked by magic bytes. Client filenames are ignored. GPS coordinates are never returned, and the optional explainer receives only report JSON. Reports and jobs are stored in SQLite with restart recovery and cleanup hooks. The free-host filesystem remains ephemeral, so the data survives normal requests but not a Render restart or redeploy.
 
 ## Accessibility Notes
 
@@ -98,4 +98,3 @@ Add SQLAlchemy-backed TTL persistence, verified ONNX weights and calibration, fu
 ## Licences and Credits:
 
 Application code is available under the repository's chosen open-source licence. Pillow, NumPy, OpenCV, imagehash, piexif, FastAPI, and SQLAlchemy remain under their respective upstream licences. No third-party dataset or detector weights are bundled.
-
