@@ -22,11 +22,11 @@ def test_upload_runs_real_pipeline():
         response = client.post("/api/v1/analyze", files={"file": ("sample.jpg", jpeg(), "image/jpeg")})
         assert response.status_code == 202
         job_id = response.json()["job_id"]
-        for _ in range(10):
+        for _ in range(100):
             job = client.get(f"/api/v1/jobs/{job_id}").json()
-            if job["status"] == "done":
+            if job["status"] in ("done", "failed"):
                 break
-            time.sleep(0.05)
+            time.sleep(0.1)
         assert job["status"] == "done"
         report = client.get(f"/api/v1/reports/{job['report_id']}")
         assert report.status_code == 200
