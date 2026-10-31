@@ -122,27 +122,82 @@ def _quality_gate(image: Image.Image) -> tuple[bool, str]:
     return True, ""
 
 
+ELA_BLOCK = 16               # block size in pixels
+ELA_RECOMPRESS_QUALITY = 90
+ELA_Z_OUTLIER = 4.0          # robust z-score a block must exceed
+ELA_MIN_LEVEL_GAP = 1.0      # and sit this many 0-255 levels above the median
+ELA_WEAK_FRACTION = 0.02     # share of flagged blocks for a weak signal
+ELA_STRONG_FRACTION = 0.10   # share of flagged blocks for a strong signal
+ELA_STRONG_REGION = 4        # strong also needs one connected group this many blocks
+
+
+def _largest_region(mask: np.ndarray) -> int:
+    """Size, in blocks, of the largest 8-connected group of flagged blocks."""
+    if not mask.any():
+        return 0
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    return int(stats[1:, cv2.CC_STAT_AREA].max())
+
+
 def _ela(image: Image.Image, derived_dir, stem: str) -> Signal:
+    """Block-level error level analysis.
+
+    The image is recompressed at a fixed quality and compared with the original.
+    Each 16x16 block gets a mean error. A block is flagged when its error is a
+    robust outlier against the rest of the image (median and MAD) and sits above
+    the median. Strength depends on the share of flagged blocks and on whether
+    they form one connected group. All thresholds are provisional until tested
+    on the validation split."""
     try:
         original = image.convert("RGB")
         encoded = io.BytesIO()
-        original.save(encoded, "JPEG", quality=90)
+        original.save(encoded, "JPEG", quality=ELA_RECOMPRESS_QUALITY)
         recompressed = Image.open(io.BytesIO(encoded.getvalue())).convert("RGB")
-        diff = ImageChops.difference(original, recompressed)
-        extrema = diff.getextrema()
-        peak = max(v[1] for v in extrema) or 1
-        heat = diff.point(lambda p: min(255, p * 8))
+        diff = np.abs(
+            np.asarray(original, dtype=np.float32) - np.asarray(recompressed, dtype=np.float32)
+        ).mean(axis=2)
+
+        bh, bw = diff.shape[0] // ELA_BLOCK, diff.shape[1] // ELA_BLOCK
+        if bh < 2 or bw < 2:
+            return Signal(name="ELA", family="compression", strength="not_determined",
+                          reason="The image is too small for block-level ELA.")
+        cropped = diff[: bh * ELA_BLOCK, : bw * ELA_BLOCK]
+        blocks = cropped.reshape(bh, ELA_BLOCK, bw, ELA_BLOCK).mean(axis=(1, 3))
+
+        median = float(np.median(blocks))
+        mad = float(np.median(np.abs(blocks - median)))
+        spread = max(1.4826 * mad, 0.25)
+        excess = blocks - median
+        z = excess / spread
+        flagged = (z > ELA_Z_OUTLIER) & (excess >= ELA_MIN_LEVEL_GAP)
+
+        fraction = float(flagged.mean())
+        region = _largest_region(flagged)
+        if fraction >= ELA_STRONG_FRACTION and region >= ELA_STRONG_REGION:
+            strength = "strong"
+        elif fraction >= ELA_WEAK_FRACTION:
+            strength = "weak"
+        else:
+            strength = "none"
+
+        heat = np.clip(z / ELA_Z_OUTLIER * 127, 0, 255).astype(np.uint8)
+        heat = cv2.resize(heat, (bw * ELA_BLOCK, bh * ELA_BLOCK), interpolation=cv2.INTER_NEAREST)
         heat_path = derived_dir / f"{stem}-ela.png"
-        heat.save(heat_path)
-        score = min(1.0, sum(1 for channel in extrema if channel[1] > peak * 0.45) / 3)
-        return Signal(name="ELA", family="compression", strength=_strength(score),
-                      score=score, reason="Error levels were compared after JPEG recompression.",
-                      evidence={"heatmap": heat_path.name},
-                      limitations=["ELA is sensitive to prior recompression."])
+        cv2.imwrite(str(heat_path), cv2.applyColorMap(heat, cv2.COLORMAP_JET))
+
+        flagged_count = int(flagged.sum())
+        return Signal(name="ELA", family="compression", strength=strength,
+                      score=round(fraction, 4),
+                      reason=(f"{flagged_count} of {flagged.size} blocks ({fraction:.1%}) have error "
+                              f"levels that stand out from the rest of the image; the largest "
+                              f"group is {region} blocks."),
+                      evidence={"heatmap": heat_path.name, "flagged_blocks": flagged_count,
+                                "largest_region_blocks": region},
+                      limitations=["ELA is sensitive to prior recompression.",
+                                   "Block size and thresholds are provisional until validated."])
     except Exception as exc:
         return Signal(name="ELA", family="compression", strength="not_determined",
                       reason=f"ELA could not run: {type(exc).__name__}.")
-
 
 def _noise(image: Image.Image, derived_dir, stem: str) -> Signal:
     try:
@@ -369,7 +424,11 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
         "sample_interval_seconds": 1,
         "strong_frame_threshold": threshold,
         "strong_frames": strong_frames,
-        "frame_tiers": [{"timestamp_seconds": round(f.timestamp, 2), "tier": f.tier} for f in frames],
+         "frame_tiers": [
+            {"timestamp_seconds": round(f.timestamp, 2), "tier": f.tier,
+             "strengths": {s.name: s.strength for s in f.signals}}
+            for f in frames
+        ],
     }
     explanation, source = explain(_explanation_input(
         tier, rule, chosen, limitations,
