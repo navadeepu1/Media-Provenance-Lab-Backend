@@ -265,12 +265,19 @@ def _copy_move(image: Image.Image) -> Signal:
                       reason=f"Copy-move analysis could not run: {type(exc).__name__}.")
 
 
-def image_signals(image: Image.Image, stem: str) -> list[Signal]:
+def image_signals(image: Image.Image, stem: str, *, from_video: bool = False) -> list[Signal]:
     derived = settings.derived_dir
     ok, reason = _quality_gate(image)
     signals: list[Signal] = []
     if ok:
-        signals.append(_ela(image, derived, stem))
+        if from_video:
+            signals.append(Signal(
+                name="ELA", family="compression", strength="not_determined",
+                reason="ELA is not used on decoded video frames: they are already lossy-compressed, "
+                       "so recompression measures the codec rather than edits.",
+                limitations=["ELA is not applied to video frames until it is validated on video."]))
+        else:
+            signals.append(_ela(image, derived, stem))
         signals.append(_noise(image, derived, stem))
         signals.append(_copy_move(image))
     else:
@@ -390,7 +397,7 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
             info = video.probe(path)
             with closing(video.sample_frames(path, info)) as sampled_frames:
                 for sampled in sampled_frames:
-                    signals = image_signals(sampled.image, f"{stem}-f{sampled.index}")
+                    signals = image_signals(sampled.image, f"{stem}-f{sampled.index}", from_video=True)
                     tier, rule = _fused(signals)
                     frames.append(_FrameResult(sampled.timestamp, tier, rule, signals))
                     heatmap_names.update(h["name"] for h in _heatmaps(signals))
