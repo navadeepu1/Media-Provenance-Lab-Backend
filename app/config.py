@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     @property
     def uploads_dir(self) -> Path:
         return self.data_dir / "uploads"
-
+    
     @property
     def derived_dir(self) -> Path:
         return self.data_dir / "derived"
