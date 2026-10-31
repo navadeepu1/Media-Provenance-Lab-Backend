@@ -199,22 +199,67 @@ def _ela(image: Image.Image, derived_dir, stem: str) -> Signal:
         return Signal(name="ELA", family="compression", strength="not_determined",
                       reason=f"ELA could not run: {type(exc).__name__}.")
 
+NOISE_BLOCK = 16             # block size in pixels, same grid as ELA
+NOISE_Z_OUTLIER = 4.0        # robust z-score a block must exceed
+NOISE_MIN_LEVEL_GAP = 0.5    # and sit this many residual levels above the median
+NOISE_WEAK_FRACTION = 0.02
+NOISE_STRONG_FRACTION = 0.10
+NOISE_STRONG_REGION = 4
+
+
 def _noise(image: Image.Image, derived_dir, stem: str) -> Signal:
+    """Block-level noise residual.
+
+    A median filter removes the image content, leaving the residual. Each 16x16
+    block gets the standard deviation of its residual. Blocks whose noise stands
+    out from the rest of the image are flagged, using the same robust z-score
+    and connected-region rules as ELA. Thresholds are provisional until
+    validated on the validation split."""
     try:
-        arr = np.asarray(image.convert("L"), dtype=np.uint8)
-        smooth = cv2.medianBlur(arr, 5)
-        residual = cv2.absdiff(arr, smooth)
-        score = float(np.clip(np.std(residual) / 32.0, 0, 1))
-        path = derived_dir / f"{stem}-noise.png"
-        cv2.imwrite(str(path), residual)
-        return Signal(name="Noise residual", family="noise", strength=_strength(score, .5, .82),
-                      score=score, reason="Local noise residual variance was compared across the image.",
-                      evidence={"heatmap": path.name},
-                      limitations=["Noise estimates are less reliable after resizing."])
+        gray = np.asarray(image.convert("L"), dtype=np.uint8)
+        residual = cv2.absdiff(gray, cv2.medianBlur(gray, 5)).astype(np.float32)
+
+        bh, bw = residual.shape[0] // NOISE_BLOCK, residual.shape[1] // NOISE_BLOCK
+        if bh < 2 or bw < 2:
+            return Signal(name="Noise residual", family="noise", strength="not_determined",
+                          reason="The image is too small for block-level noise analysis.")
+        cropped = residual[: bh * NOISE_BLOCK, : bw * NOISE_BLOCK]
+        blocks = cropped.reshape(bh, NOISE_BLOCK, bw, NOISE_BLOCK).std(axis=(1, 3))
+
+        median = float(np.median(blocks))
+        mad = float(np.median(np.abs(blocks - median)))
+        spread = max(1.4826 * mad, 0.25)
+        excess = blocks - median
+        z = excess / spread
+        flagged = (z > NOISE_Z_OUTLIER) & (excess >= NOISE_MIN_LEVEL_GAP)
+
+        fraction = float(flagged.mean())
+        region = _largest_region(flagged)
+        if fraction >= NOISE_STRONG_FRACTION and region >= NOISE_STRONG_REGION:
+            strength = "strong"
+        elif fraction >= NOISE_WEAK_FRACTION:
+            strength = "weak"
+        else:
+            strength = "none"
+
+        heat = np.clip(z / NOISE_Z_OUTLIER * 127, 0, 255).astype(np.uint8)
+        heat = cv2.resize(heat, (bw * NOISE_BLOCK, bh * NOISE_BLOCK), interpolation=cv2.INTER_NEAREST)
+        heat_path = derived_dir / f"{stem}-noise.png"
+        cv2.imwrite(str(heat_path), cv2.applyColorMap(heat, cv2.COLORMAP_JET))
+
+        flagged_count = int(flagged.sum())
+        return Signal(name="Noise residual", family="noise", strength=strength,
+                      score=round(fraction, 4),
+                      reason=(f"{flagged_count} of {flagged.size} blocks ({fraction:.1%}) have noise "
+                              f"that stands out from the rest of the image; the largest group is "
+                              f"{region} blocks."),
+                      evidence={"heatmap": heat_path.name, "flagged_blocks": flagged_count,
+                                "largest_region_blocks": region},
+                      limitations=["Edges and fine texture can raise residual noise.",
+                                   "Block size and thresholds are provisional until validated."])
     except Exception as exc:
         return Signal(name="Noise residual", family="noise", strength="not_determined",
                       reason=f"Noise analysis could not run: {type(exc).__name__}.")
-
 
 def _copy_move(image: Image.Image) -> Signal:
     """Find repeated patches. Keypoint pairs count only when many pairs share the
