@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import media, video
+from . import fixtures, media, video
 from .analysis import analyze_bytes
 from .config import settings
 from .db import (
@@ -75,12 +75,8 @@ async def startup() -> None:
     settings.derived_dir.mkdir(exist_ok=True)
     init_db()
     recover_interrupted_jobs()
-    for sample in samples:
-        if sample.id not in sample_bytes:
-            image = Image.new("RGB", (640, 480), (50 + len(sample.id) * 7 % 150, 100, 160))
-            buf = io.BytesIO()
-            image.save(buf, "PNG")
-            sample_bytes[sample.id] = buf.getvalue()
+    if not sample_bytes:
+        sample_bytes.update(fixtures.sample_images())
 
 
 async def run_job(job_id: str, raw: bytes, demo: bool) -> None:
