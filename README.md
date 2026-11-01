@@ -77,7 +77,7 @@ CI runs the same test suite on every push. Coverage exclusions are not configure
 
 ## Security and Privacy Notes
 
-Uploads are capped and checked by magic bytes. Client filenames are ignored. GPS coordinates are never returned, and the optional explainer receives only report JSON. Reports and jobs are stored in SQLite with restart recovery and cleanup hooks. The free-host filesystem remains ephemeral, so the data survives normal requests but not a Render restart or redeploy.
+Uploads are capped and checked by magic bytes. Client filenames are ignored. Analysis requests have a bounded per-IP rate limit, request IDs are returned for support, and `CORS_ORIGINS` enables an explicit origin allowlist when needed. GPS coordinates are never returned, and the optional explainer receives only report JSON. Reports and jobs are stored in SQLite with restart recovery and cleanup hooks. The free-host filesystem remains ephemeral, so the data survives normal requests but not a Render restart or redeploy.
 
 ## Accessibility Notes
 

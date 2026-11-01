@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     max_image_side: int = 5000
     data_dir: Path = Path("data")
     cors_origins: str = ""
+    rate_limit_window_seconds: int = 60
+    rate_limit_max_requests: int = 30
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
     @property

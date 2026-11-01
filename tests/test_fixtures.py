@@ -1,9 +1,4 @@
-"""Forensic checks against synthetic manipulations.
-
-The copy-move detection test is marked xfail: the detector currently finds
-8 keypoint matches where 10 are needed. It stays visible so the gap is
-recorded, not hidden. Remove the marker once the detector passes.
-"""
+"""Forensic checks against synthetic manipulations."""
 
 import pytest
 
@@ -48,7 +43,6 @@ def test_forwarded_copy_is_not_flagged(clean):
     assert all(s.strength in {"none", "not_determined"} for s in pixel)
 
 
-@pytest.mark.xfail(strict=True, reason="Copy-move finds 8 matches; the weak threshold needs 10.")
 def test_copy_move_finds_the_copied_patch(clean):
     signals = _signals(fixtures.copy_moved(clean), "fx-cm")
     assert signals["Copy-move"].evidence["match_count"] >= 10

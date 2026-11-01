@@ -3,11 +3,14 @@ import html
 import io
 import secrets
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Lock
 from typing import Annotated
 
 from fastapi import FastAPI, File, Header, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -29,6 +32,17 @@ from .detector import get_detector
 from .schemas import Report, Sample
 
 app = FastAPI(title="Media Provenance Lab", docs_url=None, redoc_url=None)
+if settings.cors_origins.strip():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-Admin-Key"],
+    )
+
+_startup_time = time.time()
+_rate_limit_lock = Lock()
+_rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
 
 
 def error(code: str, message: str, status: int) -> JSONResponse:
@@ -42,7 +56,28 @@ async def upload_rejected(request: Request, exc: media.UploadRejected) -> JSONRe
 
 @app.middleware("http")
 async def security_headers(request, call_next):
+    request_id = secrets.token_hex(16)
+    is_analysis_request = (
+        request.url.path == "/api/v1/analyze"
+        or request.url.path.startswith("/api/v1/samples/")
+            and request.url.path.endswith("/analyze")
+    )
+    if request.method == "POST" and is_analysis_request:
+        now = time.monotonic()
+        client = request.client.host if request.client else "unknown"
+        with _rate_limit_lock:
+            hits = _rate_limit_hits[client]
+            cutoff = now - settings.rate_limit_window_seconds
+            while hits and hits[0] <= cutoff:
+                hits.popleft()
+            if len(hits) >= settings.rate_limit_max_requests:
+                response = error("rate_limited", "Too many analysis requests. Please try again later.", 429)
+                response.headers["Retry-After"] = str(settings.rate_limit_window_seconds)
+                response.headers["X-Request-ID"] = request_id
+                return response
+            hits.append(now)
     response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -70,6 +105,8 @@ sample_bytes: dict[str, bytes] = {}
 
 @app.on_event("startup")
 async def startup() -> None:
+    global _startup_time
+    _startup_time = time.time()
     settings.data_dir.mkdir(exist_ok=True)
     settings.uploads_dir.mkdir(exist_ok=True)
     settings.derived_dir.mkdir(exist_ok=True)
@@ -115,7 +152,7 @@ async def health() -> dict:
             "c2pa": "not_checked",
             "explainer_provider": settings.ai_provider,
             "pipeline_version": "1.0.0",
-            "last_startup": time.time()}
+            "last_startup": _startup_time}
 
 
 @app.get("/api/v1/samples")
