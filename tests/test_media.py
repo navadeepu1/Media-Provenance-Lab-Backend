@@ -37,6 +37,27 @@ def test_corrupt_jpeg_is_rejected_with_validation_error():
     assert info.value.code == "validation_error"
 
 
+@pytest.mark.parametrize("raw", [
+    b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"\x00" * 8,
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 8,
+])
+def test_corrupt_supported_image_variants_are_rejected(raw):
+    assert media.sniff_media_type(raw) == "image"
+    with pytest.raises(media.UploadRejected) as info:
+        media.check_image_header(raw)
+    assert info.value.code == "validation_error"
+
+
+@pytest.mark.parametrize("brand", [b"mp42", b"isom", b"avc1"])
+def test_corrupt_mp4_codec_variants_are_rejected(brand):
+    raw = b"\x00\x00\x00\x18ftyp" + brand + b"\x00" * 256
+    with TestClient(app) as client:
+        response = client.post("/api/v1/analyze",
+                               files={"file": ("sample.mp4", raw, "video/mp4")})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
 def test_decompression_bomb_header_is_rejected_without_decoding():
     with pytest.raises(media.UploadRejected):
         media.check_image_header(png_header(30000, 30000))

@@ -12,10 +12,10 @@ detector_source/
 onnx_out/
 model_int8.onnx
 eval_data/
+eval/generated/
 *.db
 *.sqlite
 *.log
 *.onnx
 *.pth
 *.safetensors
-

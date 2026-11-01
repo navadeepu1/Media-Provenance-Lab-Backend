@@ -1,9 +1,12 @@
 import io
 import time
+from datetime import datetime, timedelta, timezone
+import pytest
 from PIL import Image
 from fastapi.testclient import TestClient
 from app import main
 from app.config import settings
+from app.db import JobRow, ReportRow, SessionLocal, cleanup_expired
 from app.main import app
 
 
@@ -67,3 +70,64 @@ def test_analysis_rate_limit_returns_retryable_error(monkeypatch):
     assert second.status_code == 429
     assert second.headers["retry-after"] == "60"
     assert second.json()["error"]["code"] == "rate_limited"
+
+
+def test_admin_cleanup_authorization_matrix(monkeypatch):
+    monkeypatch.setattr(settings, "admin_api_key", "test-admin-key")
+    monkeypatch.setattr(main, "cleanup_expired", lambda: {"reports": 2, "uploads": 1})
+    with TestClient(app) as client:
+        assert client.post("/api/v1/admin/cleanup").status_code == 401
+        assert client.post(
+            "/api/v1/admin/cleanup", headers={"X-Admin-Key": "wrong"}
+        ).status_code == 401
+        response = client.post(
+            "/api/v1/admin/cleanup", headers={"X-Admin-Key": "test-admin-key"}
+        )
+    assert response.status_code == 200
+    assert response.json() == {"reports": 2, "uploads": 1}
+
+
+@pytest.mark.parametrize("suffix", ["", "/export", "/heatmaps/example.png"])
+def test_expired_report_returns_gone(suffix):
+    report_id = "expired-test-report"
+    with SessionLocal.begin() as session:
+        session.merge(ReportRow(
+            id=report_id,
+            job_id="expired-test-job",
+            payload="{}",
+            expires_at=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1),
+        ))
+    with TestClient(app) as client:
+        response = client.get(f"/api/v1/reports/{report_id}{suffix}")
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "expired"
+
+
+def test_cleanup_removes_expired_report_and_upload(tmp_path):
+    report_id = "cleanup-test-report"
+    job_id = "cleanup-test-job"
+    upload = tmp_path / "upload.bin"
+    upload.write_bytes(b"temporary")
+    old = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=2)
+    with SessionLocal.begin() as session:
+        session.merge(ReportRow(
+            id=report_id, job_id=job_id, payload="{}",
+            created_at=old, expires_at=old,
+        ))
+        session.merge(JobRow(
+            id=job_id, raw_path=str(upload), created_at=old,
+        ))
+    result = cleanup_expired()
+    assert result["reports"] >= 1
+    assert result["uploads"] >= 1
+    assert not upload.exists()
+
+
+def test_scheduled_cleanup_runs_and_stops(monkeypatch):
+    calls = []
+    monkeypatch.setattr(settings, "cleanup_interval_seconds", 0.01)
+    monkeypatch.setattr(main, "cleanup_expired", lambda: calls.append(True) or {"reports": 0, "uploads": 0})
+    with TestClient(app):
+        time.sleep(0.05)
+    assert calls
+    assert main._cleanup_task is None or main._cleanup_task.done()

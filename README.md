@@ -14,7 +14,7 @@ Images are often copied, recompressed, or edited, but a binary verdict hides unc
 
 ## Approach and Logic
 
-The pipeline validates file signatures and dimensions, reads non-sensitive provenance context, runs ELA, noise residual, and ORB copy-move checks, then applies deterministic R1-R4 fusion rules. Missing optional detector weights produce `not_determined`, never a silent clean result.
+The pipeline validates file signatures and dimensions, reads non-sensitive provenance context including optional C2PA capability status, runs tiled ELA, tiled noise residual, and spatially validated ORB copy-move checks, then applies deterministic R1-R4 fusion rules. Missing optional detector weights produce `not_determined`, never a silent clean result.
 
 ## How the Solution Works
 
@@ -64,13 +64,19 @@ Create a new Blueprint from this repository. `render.yaml` uses Render's native 
 
 ## Evaluation Results:
 
-No evaluation dataset has been supplied yet, so this repository reports no measured accuracy. It must not invent metrics; a future `eval/results.json` is the source of truth.
+The reproducible synthetic evaluation manifest and results are in
+[eval/manifest.json](eval/manifest.json) and [eval/results.json](eval/results.json).
+Regenerate them with `python scripts/generate_eval.py`. These are regression
+measurements on original CC0-1.0 synthetic content, not real-world accuracy.
 
 ## Testing:
 
 ```powershell
 pip install -r requirements-dev.txt
 pytest --cov=app --cov-report=term-missing
+python scripts/generate_eval.py
+python scripts/check_secrets.py
+python scripts/check_repo_size.py
 ```
 
 CI runs the same test suite on every push. Coverage exclusions are not configured.
@@ -93,7 +99,7 @@ Free Render cold starts can take up to a minute, local storage is ephemeral, and
 
 ## Future Work
 
-Add SQLAlchemy-backed TTL persistence, verified ONNX weights and calibration, full OpenCV video frame aggregation, C2PA support when the Linux wheel is confirmed, evaluation data, and a live smoke test.
+The baseline includes SQLAlchemy-backed TTL persistence, verified ONNX checksum handling and calibration tooling, OpenCV video frame aggregation with strongest-frame display, optional C2PA inspection, known-item pHash/dHash context, optional Gemini/Groq explanations with timeout/cache fallback, and keyboard/360px regression tests. Evaluation data, licensed model provenance, and live deployment remain release prerequisites.
 
 ## Licences and Credits:
 

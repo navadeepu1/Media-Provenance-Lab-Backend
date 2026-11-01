@@ -46,3 +46,5 @@ def test_forwarded_copy_is_not_flagged(clean):
 def test_copy_move_finds_the_copied_patch(clean):
     signals = _signals(fixtures.copy_moved(clean), "fx-cm")
     assert signals["Copy-move"].evidence["match_count"] >= 10
+    assert signals["Copy-move"].evidence["region_valid"] is True
+    assert signals["Copy-move"].evidence["validated_match_count"] >= 6

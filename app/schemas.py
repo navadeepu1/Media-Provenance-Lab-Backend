@@ -30,6 +30,7 @@ class Report(BaseModel):
     explanation: str
     explanation_source: Literal["ai", "template"]
     heatmaps: list[dict[str, str]]
+    frame_thumbnails: list[dict[str, str]] = Field(default_factory=list)
     reverse_search: list[dict[str, str]]
     demo: bool = False
 
@@ -40,4 +41,3 @@ class Sample(BaseModel):
     description: str
     expected_tier: Tier | None = None
     synthetic: bool = True
-

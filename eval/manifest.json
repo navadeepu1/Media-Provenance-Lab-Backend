@@ -1,0 +1,111 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "mpl-synthetic-eval-v1",
+  "purpose": "Regression evaluation of deterministic evidence signals.",
+  "license": "CC0-1.0",
+  "license_scope": "All generated samples in this manifest are original synthetic outputs of this repository.",
+  "notices": [
+    "This is not a real-world accuracy benchmark.",
+    "The edited/reference labels describe the generator intent, not human forensic ground truth.",
+    "Do not use these results to claim detector or production accuracy."
+  ],
+  "seed_policy": "All sample seeds and transformations are recorded per item.",
+  "samples": [
+    {
+      "id": "clean-seed-1",
+      "path": "eval/generated/clean-seed-1.jpg",
+      "sha256": "3d39dbcd0f95c6d99ab9ebd43dda5e9fd35932ad7a90e1a7937327fceba140e3",
+      "media_type": "image",
+      "split": "train",
+      "label": "reference",
+      "edited": false,
+      "generator": "scene(1)",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "clean-seed-2",
+      "path": "eval/generated/clean-seed-2.jpg",
+      "sha256": "1f0b4912f7e1d82fbb0bb5da2d854de0a75ad9b3a6bf49a50d0ffba2ab86c9a7",
+      "media_type": "image",
+      "split": "validation",
+      "label": "reference",
+      "edited": false,
+      "generator": "scene(2)",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "forwarded-seed-1",
+      "path": "eval/generated/forwarded-seed-1.jpg",
+      "sha256": "eedcb19e78914d4bb1278f4ef274e2bd7713c354411cba886dae6baf1d0ffce5",
+      "media_type": "image",
+      "split": "test",
+      "label": "edited",
+      "edited": true,
+      "generator": "forwarded(scene(1))",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "forwarded-seed-2",
+      "path": "eval/generated/forwarded-seed-2.jpg",
+      "sha256": "615905e2eaf31e249804d025b899afa43f999e3caa92129c44dde9171add0de4",
+      "media_type": "image",
+      "split": "train",
+      "label": "edited",
+      "edited": true,
+      "generator": "forwarded(scene(2))",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "spliced-seed-1",
+      "path": "eval/generated/spliced-seed-1.jpg",
+      "sha256": "6e2e10498e6eb27f16c17ea1c55865737d6aea6c9a1a94ed1ea6d93ffa910c5d",
+      "media_type": "image",
+      "split": "validation",
+      "label": "edited",
+      "edited": true,
+      "generator": "spliced(scene(1), donor_seed=99)",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "spliced-seed-2",
+      "path": "eval/generated/spliced-seed-2.jpg",
+      "sha256": "09301db37c6fbe8035b1f7280572ef3f869cccf0583a03e373151c1cbb5a15fb",
+      "media_type": "image",
+      "split": "test",
+      "label": "edited",
+      "edited": true,
+      "generator": "spliced(scene(2), donor_seed=100)",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "copy-moved-seed-1",
+      "path": "eval/generated/copy-moved-seed-1.jpg",
+      "sha256": "a39d5c1c747c82c89d1a33b8569a71c6af00085543167a5b7025775bbcd79d31",
+      "media_type": "image",
+      "split": "train",
+      "label": "edited",
+      "edited": true,
+      "generator": "copy_moved(scene(1))",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    },
+    {
+      "id": "short-video-seed-1",
+      "path": "eval/generated/short-video-seed-1.mp4",
+      "sha256": "6f44608c9c40a88cae9854728c588f51fc67c14f68c5cbb16357a73008fbcba4",
+      "media_type": "video",
+      "split": "validation",
+      "label": "edited",
+      "edited": true,
+      "generator": "short_video_bytes(seed=1)",
+      "license": "CC0-1.0",
+      "attribution": "Media Provenance Lab project-generated synthetic content"
+    }
+  ]
+}

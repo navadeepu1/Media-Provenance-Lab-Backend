@@ -4,6 +4,7 @@ import piexif
 from PIL import Image
 
 from app.analysis import provenance
+from app import c2pa
 
 
 def jpeg_with_exif() -> bytes:
@@ -51,3 +52,11 @@ def test_low_quality_jpeg_has_quality_estimate():
     image.save(output, "JPEG", quality=30)
     result = provenance(Image.open(io.BytesIO(output.getvalue())), output.getvalue())
     assert result["jpeg_quality_estimate"] < 60
+
+
+def test_c2pa_capability_is_explicit_when_binding_is_missing(monkeypatch):
+    monkeypatch.setattr(c2pa, "capability", lambda: "unavailable")
+    result = c2pa.inspect_bytes(b"not-a-media-file", ".jpg")
+    assert result["capability"] == "unavailable"
+    assert result["status"] == "not_checked"
+    assert result["manifest_count"] == 0

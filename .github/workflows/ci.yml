@@ -10,3 +10,6 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: pytest --cov=app --cov-report=term-missing
+      - run: python scripts/generate_eval.py
+      - run: python scripts/check_secrets.py
+      - run: python scripts/check_repo_size.py

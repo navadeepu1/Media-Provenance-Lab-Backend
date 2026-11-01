@@ -107,6 +107,7 @@ def test_only_referenced_heatmaps_remain_on_disk(isolated):
     stem = hashlib.sha256(raw).hexdigest()[:16]
     on_disk = {p.name for p in settings.derived_dir.glob(f"{stem}-*")}
     referenced = {h["name"] for h in report.heatmaps}
+    referenced.update(frame["name"] for frame in report.frame_thumbnails)
     assert on_disk == referenced
 
 

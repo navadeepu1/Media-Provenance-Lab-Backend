@@ -20,7 +20,8 @@ import numpy as np
 import piexif
 from PIL import ExifTags, Image, ImageChops
 
-from . import media, video
+from . import c2pa, media, video
+from . import known_items
 from .config import settings
 from .detector import run_learned_detector
 from .explainer import explain
@@ -129,6 +130,26 @@ ELA_MIN_LEVEL_GAP = 1.0      # and sit this many 0-255 levels above the median
 ELA_WEAK_FRACTION = 0.02     # share of flagged blocks for a weak signal
 ELA_STRONG_FRACTION = 0.10   # share of flagged blocks for a strong signal
 ELA_STRONG_REGION = 4        # strong also needs one connected group this many blocks
+FORENSIC_TILE_SIZE = 1024
+
+
+def _tiled_blocks(values: np.ndarray, block_size: int, reducer: str) -> np.ndarray:
+    """Reduce aligned blocks without creating a full block-view copy."""
+    height, width = values.shape
+    block_rows, block_cols = height // block_size, width // block_size
+    output = np.empty((block_rows, block_cols), dtype=np.float32)
+    for row in range(0, block_rows, max(1, FORENSIC_TILE_SIZE // block_size)):
+        for col in range(0, block_cols, max(1, FORENSIC_TILE_SIZE // block_size)):
+            row_end = min(block_rows, row + FORENSIC_TILE_SIZE // block_size)
+            col_end = min(block_cols, col + FORENSIC_TILE_SIZE // block_size)
+            tile = values[
+                row * block_size:row_end * block_size,
+                col * block_size:col_end * block_size,
+            ]
+            view = tile.reshape(row_end - row, block_size, col_end - col, block_size)
+            reduced = view.mean(axis=(1, 3)) if reducer == "mean" else view.std(axis=(1, 3))
+            output[row:row_end, col:col_end] = reduced
+    return output
 
 
 def _largest_region(mask: np.ndarray) -> int:
@@ -162,7 +183,7 @@ def _ela(image: Image.Image, derived_dir, stem: str) -> Signal:
             return Signal(name="ELA", family="compression", strength="not_determined",
                           reason="The image is too small for block-level ELA.")
         cropped = diff[: bh * ELA_BLOCK, : bw * ELA_BLOCK]
-        blocks = cropped.reshape(bh, ELA_BLOCK, bw, ELA_BLOCK).mean(axis=(1, 3))
+        blocks = _tiled_blocks(cropped, ELA_BLOCK, "mean")
 
         median = float(np.median(blocks))
         mad = float(np.median(np.abs(blocks - median)))
@@ -224,7 +245,7 @@ def _noise(image: Image.Image, derived_dir, stem: str) -> Signal:
             return Signal(name="Noise residual", family="noise", strength="not_determined",
                           reason="The image is too small for block-level noise analysis.")
         cropped = residual[: bh * NOISE_BLOCK, : bw * NOISE_BLOCK]
-        blocks = cropped.reshape(bh, NOISE_BLOCK, bw, NOISE_BLOCK).std(axis=(1, 3))
+        blocks = _tiled_blocks(cropped, NOISE_BLOCK, "std")
 
         median = float(np.median(blocks))
         mad = float(np.median(np.abs(blocks - median)))
@@ -262,14 +283,13 @@ def _noise(image: Image.Image, derived_dir, stem: str) -> Signal:
                       reason=f"Noise analysis could not run: {type(exc).__name__}.")
 
 def _copy_move(image: Image.Image) -> Signal:
-    """Find repeated patches. Keypoint pairs count only when many pairs share the
-    same displacement (offset clustering). This version gives a count and an
-    offset, not a region. Region validation is Part B."""
+    """Find repeated patches and require a spatially coherent source/destination region."""
     try:
         gray = np.asarray(image.convert("L"))
         orb = cv2.ORB_create(nfeatures=1500, fastThreshold=20)
         keypoints, descriptors = orb.detectAndCompute(gray, None)
         votes: dict[tuple[int, int], int] = {}
+        matches: list[tuple[np.ndarray, np.ndarray, tuple[int, int]]] = []
         if descriptors is not None and len(keypoints) > 12:
             matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
             neighbours = matcher.knnMatch(descriptors, descriptors, k=3)
@@ -287,6 +307,7 @@ def _copy_move(image: Image.Image) -> Signal:
                     continue
                 key = (int(round(dx / 4)), int(round(dy / 4)))  # 4 px bins
                 votes[key] = votes.get(key, 0) + 1
+                matches.append((p, q, key))
 
         best_count, best_offset = 0, (0, 0)
         for bx, by in votes:
@@ -294,7 +315,24 @@ def _copy_move(image: Image.Image) -> Signal:
             if total > best_count:
                 best_count, best_offset = total, (bx * 4, by * 4)
 
-        score = min(1.0, best_count / 20)
+        cluster = [
+            (p, q) for p, q, key in matches
+            if abs(key[0] - round(best_offset[0] / 4)) <= 1
+            and abs(key[1] - round(best_offset[1] / 4)) <= 1
+        ]
+        region_valid = len(cluster) >= 6
+        source_bbox = destination_bbox = None
+        if region_valid:
+            source = np.asarray([p for p, _ in cluster])
+            destination = np.asarray([q for _, q in cluster])
+            source_bbox = [round(float(source[:, 0].min())), round(float(source[:, 1].min())),
+                           round(float(source[:, 0].max())), round(float(source[:, 1].max()))]
+            destination_bbox = [round(float(destination[:, 0].min())), round(float(destination[:, 1].min())),
+                                round(float(destination[:, 0].max())), round(float(destination[:, 1].max()))]
+            region_valid = (source_bbox[2] - source_bbox[0] >= 16
+                            and source_bbox[3] - source_bbox[1] >= 16)
+        validated_count = len(cluster) if region_valid else 0
+        score = min(1.0, validated_count / 20)
         if best_count:
             reason = (f"{best_count} keypoint pairs share one displacement of about "
                       f"{best_offset[0]}, {best_offset[1]} pixels.")
@@ -302,9 +340,11 @@ def _copy_move(image: Image.Image) -> Signal:
             reason = "No keypoint pairs shared a displacement."
         return Signal(name="Copy-move", family="duplication", strength=_strength(score, 0.5, 0.8),
                       score=score, reason=reason,
-                      evidence={"match_count": best_count, "offset_px": list(best_offset)},
+                      evidence={"match_count": best_count, "validated_match_count": validated_count,
+                                "offset_px": list(best_offset), "region_valid": region_valid,
+                                "source_bbox": source_bbox, "destination_bbox": destination_bbox},
                       limitations=["Flat regions and heavy resizing reduce feature matches.",
-                                   "This version reports a count and offset, not a region."])
+                                   "Region validation requires a coherent cluster of keypoints."])
     except Exception as exc:
         return Signal(name="Copy-move", family="duplication", strength="not_determined",
                       reason=f"Copy-move analysis could not run: {type(exc).__name__}.")
@@ -366,11 +406,12 @@ def _explanation_input(tier, rule, signals, limitations, extra=None) -> dict:
 
 
 def _report(report_id, tier, rule, signals, provenance_data, limitations,
-            explanation, source, demo) -> Report:
+            explanation, source, demo, known_matches=None, frame_thumbnails=None) -> Report:
     return Report(report_id=report_id, tier=tier, applied_rule=rule, signals=signals,
-                  provenance=provenance_data, known_item_matches=[], limitations=limitations,
+                  provenance=provenance_data, known_item_matches=known_matches or [], limitations=limitations,
                   explanation=explanation, explanation_source=source,
                   heatmaps=_heatmaps(signals),
+                  frame_thumbnails=frame_thumbnails or [],
                   reverse_search=[dict(item) for item in REVERSE_SEARCH], demo=demo)
 
 
@@ -385,8 +426,10 @@ def _analyze_image(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
     tier, rule = _fused(signals)
     limitations = _collect_limitations(signals)
     explanation, source = explain(_explanation_input(tier, rule, signals, limitations))
-    return _report(report_id, tier, rule, signals, provenance(image, raw), limitations,
-                   explanation, source, demo)
+    provenance_data = provenance(image, raw)
+    provenance_data["c2pa"] = c2pa.inspect_bytes(raw, ".jpg")
+    return _report(report_id, tier, rule, signals, provenance_data, limitations,
+                   explanation, source, demo, known_matches=known_items.match(image))
 
 
 @dataclass(frozen=True)
@@ -395,6 +438,7 @@ class _FrameResult:
     tier: str
     rule: str
     signals: list[Signal]
+    image: Image.Image
 
 
 def aggregate_frame_tiers(tiers: list[str]) -> tuple[str, str, int]:
@@ -433,6 +477,31 @@ def _strongest_per_module(frames: list[_FrameResult]) -> list[Signal]:
     ]
 
 
+def _frame_thumbnails(frames: list[_FrameResult], stem: str) -> list[dict[str, str]]:
+    ranked = sorted(
+        frames,
+        key=lambda frame: (
+            {STRONG: 3, WEAK: 2, NONE: 1, INCONCLUSIVE: 0}[frame.tier],
+            max((signal.score or 0 for signal in frame.signals), default=0),
+        ),
+        reverse=True,
+    )
+    thumbnails = []
+    for frame in ranked[:3]:
+        name = f"{stem}-frame-{int(frame.timestamp):04d}.jpg"
+        path = settings.derived_dir / name
+        thumbnail = frame.image.convert("RGB")
+        thumbnail.thumbnail((640, 640))
+        thumbnail.save(path, "JPEG", quality=85)
+        thumbnails.append({
+            "name": name,
+            "timestamp_seconds": str(round(frame.timestamp, 2)),
+            "tier": frame.tier,
+            "description": f"Strongest sampled frame at {frame.timestamp:.2f} seconds ({frame.tier}).",
+        })
+    return thumbnails
+
+
 def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
     frames: list[_FrameResult] = []
     heatmap_names: set[str] = set()
@@ -444,7 +513,7 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
                 for sampled in sampled_frames:
                     signals = image_signals(sampled.image, f"{stem}-f{sampled.index}", from_video=True)
                     tier, rule = _fused(signals)
-                    frames.append(_FrameResult(sampled.timestamp, tier, rule, signals))
+                    frames.append(_FrameResult(sampled.timestamp, tier, rule, signals, sampled.image.copy()))
                     heatmap_names.update(h["name"] for h in _heatmaps(signals))
     except video.VideoError as exc:
         raise media.UploadRejected("validation_error", str(exc), 422) from exc
@@ -455,9 +524,10 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
 
     tier, rule, threshold = aggregate_frame_tiers([f.tier for f in frames])
     chosen = _strongest_per_module(frames)
+    frame_thumbnails = _frame_thumbnails(frames, stem)
 
     # Keep heatmaps only for the strongest frames. Delete the rest to save disk space.
-    keep = {h["name"] for h in _heatmaps(chosen)}
+    keep = {h["name"] for h in _heatmaps(chosen)} | {item["name"] for item in frame_thumbnails}
     for name in heatmap_names - keep:
         (settings.derived_dir / name).unlink(missing_ok=True)
 
@@ -470,6 +540,7 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
 
     provenance_data = {
         "media_type": "video",
+        "c2pa": c2pa.inspect_bytes(raw, ".mp4"),
         "duration_seconds": round(info.duration, 2),
         "frames_per_second": round(info.fps, 2),
         "frames_analysed": len(frames),
@@ -487,7 +558,7 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
         extra={"frames": {"analysed": len(frames), "strong": strong_frames, "threshold": threshold}},
     ))
     return _report(report_id, tier, rule, chosen, provenance_data, limitations,
-                   explanation, source, demo)
+                   explanation, source, demo, frame_thumbnails=frame_thumbnails)
 
 
 def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Report:

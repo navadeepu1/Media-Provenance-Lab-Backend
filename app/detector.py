@@ -6,6 +6,7 @@ returns "not_determined". A failure is never reported as human or clean.
 
 from __future__ import annotations
 import hashlib
+import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
@@ -18,6 +19,7 @@ import numpy as np
 from PIL import Image
 
 from .config import settings
+from .calibration import apply_platt
 from .constants import (
     DETECTOR_ARTIFICIAL_INDEX,
     DETECTOR_INPUT_SIZE,
@@ -96,6 +98,14 @@ class OnnxDetector:
         self._session = None
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="detector")
+        self._calibration: tuple[float, float] | None = None
+        if settings.detector_calibration_path:
+            calibration_path = Path(settings.detector_calibration_path)
+            if not calibration_path.is_absolute():
+                calibration_path = PROJECT_ROOT / calibration_path
+            if calibration_path.is_file():
+                data = json.loads(calibration_path.read_text(encoding="utf-8"))
+                self._calibration = (float(data["scale"]), float(data["offset"]))
 
     @property
     def status(self) -> str:
@@ -136,7 +146,13 @@ class OnnxDetector:
             return DetectorOutput("not_determined", reason="Detector timed out.")
         except Exception:
             return DetectorOutput("not_determined", reason="Detector inference failed.")
-        return interpret_logits(logits)
+        output = interpret_logits(logits)
+        if output.status == "ok" and output.ai_probability is not None and self._calibration:
+            output = DetectorOutput(
+                "ok",
+                ai_probability=apply_platt(output.ai_probability, *self._calibration),
+            )
+        return output
 
 
 def learned_signal(output: DetectorOutput) -> dict:

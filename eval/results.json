@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "manifest": "mpl-synthetic-eval-v1",
+  "generated_by": "scripts/generate_eval.py",
+  "sample_count": 8,
+  "split_counts": {
+    "train": 3,
+    "validation": 3,
+    "test": 2
+  },
+  "metrics": {
+    "metric": "signal_detected means STRONG_SIGNALS or WEAK_SIGNALS",
+    "synthetic_signal_accuracy": 0.75,
+    "synthetic_signal_precision": 1.0,
+    "synthetic_signal_recall": 0.6667,
+    "true_positive": 4,
+    "false_positive": 0,
+    "false_negative": 2
+  },
+  "limitations": [
+    "This is not a real-world accuracy benchmark.",
+    "The edited/reference labels describe the generator intent, not human forensic ground truth.",
+    "Do not use these results to claim detector or production accuracy."
+  ],
+  "observations": [
+    {
+      "id": "clean-seed-1",
+      "split": "train",
+      "label": "reference",
+      "tier": "NO_SIGNALS",
+      "rule": "R4",
+      "signal_detected": false
+    },
+    {
+      "id": "clean-seed-2",
+      "split": "validation",
+      "label": "reference",
+      "tier": "NO_SIGNALS",
+      "rule": "R4",
+      "signal_detected": false
+    },
+    {
+      "id": "forwarded-seed-1",
+      "split": "test",
+      "label": "edited",
+      "tier": "NO_SIGNALS",
+      "rule": "R4",
+      "signal_detected": false
+    },
+    {
+      "id": "forwarded-seed-2",
+      "split": "train",
+      "label": "edited",
+      "tier": "WEAK_SIGNALS",
+      "rule": "R2",
+      "signal_detected": true
+    },
+    {
+      "id": "spliced-seed-1",
+      "split": "validation",
+      "label": "edited",
+      "tier": "WEAK_SIGNALS",
+      "rule": "R2",
+      "signal_detected": true
+    },
+    {
+      "id": "spliced-seed-2",
+      "split": "test",
+      "label": "edited",
+      "tier": "WEAK_SIGNALS",
+      "rule": "R2",
+      "signal_detected": true
+    },
+    {
+      "id": "copy-moved-seed-1",
+      "split": "train",
+      "label": "edited",
+      "tier": "NO_SIGNALS",
+      "rule": "R4",
+      "signal_detected": false
+    },
+    {
+      "id": "short-video-seed-1",
+      "split": "validation",
+      "label": "edited",
+      "tier": "WEAK_SIGNALS",
+      "rule": "R2",
+      "signal_detected": true
+    }
+  ]
+}

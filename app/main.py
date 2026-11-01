@@ -1,6 +1,7 @@
 import asyncio
 import html
 import io
+import logging
 import secrets
 import time
 from collections import defaultdict, deque
@@ -15,7 +16,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import fixtures, media, video
+from . import fixtures, known_items, media, video
+from . import c2pa
 from .analysis import analyze_bytes
 from .config import settings
 from .db import (
@@ -24,6 +26,7 @@ from .db import (
     init_db,
     job_dict,
     load_report,
+    report_status,
     recover_interrupted_jobs,
     save_report,
     update_job,
@@ -43,6 +46,8 @@ if settings.cors_origins.strip():
 _startup_time = time.time()
 _rate_limit_lock = Lock()
 _rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
+_cleanup_task: asyncio.Task | None = None
+logger = logging.getLogger(__name__)
 
 
 def error(code: str, message: str, status: int) -> JSONResponse:
@@ -105,7 +110,7 @@ sample_bytes: dict[str, bytes] = {}
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _startup_time
+    global _cleanup_task, _startup_time
     _startup_time = time.time()
     settings.data_dir.mkdir(exist_ok=True)
     settings.uploads_dir.mkdir(exist_ok=True)
@@ -114,6 +119,33 @@ async def startup() -> None:
     recover_interrupted_jobs()
     if not sample_bytes:
         sample_bytes.update(fixtures.sample_images())
+    from PIL import Image
+    import io
+    known_items.seed(
+        "known-clean-scene",
+        "Known clean synthetic scene",
+        "Reference image used to demonstrate perceptual matching.",
+        Image.open(io.BytesIO(sample_bytes["known-item"])),
+    )
+    _cleanup_task = asyncio.create_task(_cleanup_loop())
+
+
+async def _cleanup_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(max(0.01, float(settings.cleanup_interval_seconds)))
+            await asyncio.to_thread(cleanup_expired)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Scheduled expired-data cleanup failed")
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        await asyncio.gather(_cleanup_task, return_exceptions=True)
 
 
 async def run_job(job_id: str, raw: bytes, demo: bool) -> None:
@@ -149,7 +181,7 @@ async def health() -> dict:
     detector = get_detector()
     return {"database": "ok",
             "detector": detector.status if detector else "disabled",
-            "c2pa": "not_checked",
+            "c2pa": c2pa.capability(),
             "explainer_provider": settings.ai_provider,
             "pipeline_version": "1.0.0",
             "last_startup": _startup_time}
@@ -210,6 +242,9 @@ async def get_job(job_id: str) -> dict:
 async def get_report(report_id: str) -> Report:
     payload = load_report(report_id)
     if not payload:
+        status = report_status(report_id)
+        if status == "expired":
+            return error("expired", "This report has expired.", 410)
         return error("not_found", "Report not found.", 404)
     return Report.model_validate(payload)
 
@@ -218,7 +253,12 @@ async def get_report(report_id: str) -> Report:
 async def get_heatmap(report_id: str, name: str) -> Response:
     payload = load_report(report_id)
     report = Report.model_validate(payload) if payload else None
-    if not report or "/" in name or "\\" in name or name not in {h["name"] for h in report.heatmaps}:
+    if not report:
+        status = report_status(report_id)
+        if status == "expired":
+            return error("expired", "This report has expired.", 410)
+        return error("not_found", "Report not found.", 404)
+    if "/" in name or "\\" in name or name not in {h["name"] for h in report.heatmaps}:
         return error("not_found", "Heatmap not found.", 404)
     path = settings.derived_dir / name
     if not path.is_file():
@@ -231,6 +271,9 @@ async def export_report(report_id: str) -> Response:
     payload = load_report(report_id)
     report = Report.model_validate(payload) if payload else None
     if not report:
+        status = report_status(report_id)
+        if status == "expired":
+            return error("expired", "This report has expired.", 410)
         return error("not_found", "Report not found.", 404)
     rows = "".join(
         f"<tr><td>{html.escape(s.name)}</td><td>{s.strength}</td><td>{s.score}</td>"
@@ -260,7 +303,7 @@ async def admin_cleanup(x_admin_key: Annotated[str | None, Header()] = None) -> 
         return error("service_unavailable", "Cleanup is not configured.", 503)
     if not x_admin_key or not secrets.compare_digest(x_admin_key, settings.admin_api_key):
         return error("unauthorized", "The admin key is not valid.", 401)
-    return cleanup_expired()
+    return await asyncio.to_thread(cleanup_expired)
 
 
 @app.get("/")
