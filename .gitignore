@@ -12,6 +12,8 @@ detector_source/
 onnx_out/
 model_int8.onnx
 eval_data/
+eval/real_results.json
+eval/forensic_calibration.json
 eval/generated/
 *.db
 *.sqlite

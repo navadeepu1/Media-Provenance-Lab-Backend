@@ -36,6 +36,23 @@ def test_unrelated_image_does_not_match(monkeypatch, tmp_path):
     assert not any(item["id"] == item_id for item in known_items.match(unrelated))
 
 
+def test_hashes_bound_large_images(monkeypatch):
+    from app.known_items import hashes
+
+    image = Image.new("RGB", (5000, 4000), "blue")
+    observed = {}
+
+    def fake_phash(value):
+        observed["size"] = value.size
+        return "0" * 16
+
+    monkeypatch.setattr(known_items.imagehash, "phash", fake_phash)
+    monkeypatch.setattr(known_items.imagehash, "dhash", fake_phash)
+    hashes(image)
+
+    assert max(observed["size"]) <= 1024
+
+
 def _jpeg(image: Image.Image, quality: int) -> bytes:
     output = BytesIO()
     image.save(output, "JPEG", quality=quality)

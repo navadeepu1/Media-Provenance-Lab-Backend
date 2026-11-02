@@ -9,6 +9,13 @@ The fusion rules are deterministic:
 
 The current image modules are tiled ELA, tiled noise residual, ORB copy-move with spatial region validation, and a local ONNX learned detector. The detector resizes RGB input to 224x224, applies the ImageNet mean and standard deviation, and maps output index 0 to artificial and index 1 to human. Scores are bounded between zero and one. No score alone is a verdict.
 
+Forensic score calibration is advisory and runs with
+`python scripts/calibrate_forensics.py` against a labeled validation split.
+It requires both classes and multiple source groups, reports proposed
+per-module detection thresholds, and never changes production constants
+automatically. Source-related variants must remain in one split to prevent
+leakage.
+
 The learned detector is loaded lazily from `DETECTOR_LOCAL_PATH` and its SHA-256 is verified before loading when configured. Missing, invalid, mismatched, timed-out, or failed inference returns `not_determined`. The detector is currently excluded from fusion tier decisions until calibration on a validation split is complete.
 
 Provenance is context rather than a verdict: camera fields, software, capture time, and a boolean location-presence flag are exposed without GPS coordinates. JPEG quantization is used as a quality estimate. C2PA capability and manifest status are reported separately; unavailable C2PA support is not treated as absence of provenance. If an embedded JPEG thumbnail is present, its pHash distance from a resized main image is reported as context; the current fusion rules do not penalize this signal until a validation split demonstrates that it improves results. A small image with no camera fields and a low estimated JPEG quality is labelled as a likely messaging-style re-encoded copy.

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     max_video_bytes: int = 25 * 1024 * 1024
     max_pixels: int = 16_000_000
     max_image_side: int = 5000
+    analysis_max_side: int = 2048
     data_dir: Path = Path("data")
     cors_origins: str = ""
     rate_limit_window_seconds: int = 60

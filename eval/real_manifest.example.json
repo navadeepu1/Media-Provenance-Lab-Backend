@@ -1,0 +1,92 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "mpl-real-eval-v1",
+  "purpose": "Labeled real-world evaluation; replace all example records.",
+  "samples": [
+    {
+      "id": "personal-photo-01",
+      "path": "authentic/photo_01.jpg",
+      "label": "authentic",
+      "expected_detection": false,
+      "source_type": "personal",
+      "license": "private-consented",
+      "source": "captured by project contributor",
+      "source_url": "not_applicable",
+      "attribution_requirements": "not_applicable",
+      "download_date": "not_applicable",
+      "modification_history": ["Original source file; no modification."],
+      "consent_record": "Project contributor consent recorded offline.",
+      "split": "test"
+    },
+    {
+      "id": "recompressed-photo-01",
+      "path": "recompressed/photo_01.jpg",
+      "label": "recompressed",
+      "expected_detection": true,
+      "source_type": "personal",
+      "license": "private-consented",
+      "source": "derived from personal-photo-01 using documented JPEG recompression",
+      "source_url": "not_applicable",
+      "attribution_requirements": "not_applicable",
+      "download_date": "not_applicable",
+      "modification_history": ["JPEG recompression at quality 82."],
+      "split": "test"
+    },
+    {
+      "id": "spliced-photo-01",
+      "path": "spliced/photo_01.jpg",
+      "label": "spliced",
+      "expected_detection": true,
+      "source_type": "personal",
+      "license": "private-consented",
+      "source": "derived from personal-photo-01 using documented patch insertion",
+      "source_url": "not_applicable",
+      "attribution_requirements": "not_applicable",
+      "download_date": "not_applicable",
+      "modification_history": ["Patch inserted from a second source image."],
+      "split": "test"
+    },
+    {
+      "id": "copy-moved-photo-01",
+      "path": "copy_moved/photo_01.jpg",
+      "label": "copy_moved",
+      "expected_detection": true,
+      "source_type": "personal",
+      "license": "private-consented",
+      "source": "derived from personal-photo-01 using documented patch duplication",
+      "source_url": "not_applicable",
+      "attribution_requirements": "not_applicable",
+      "download_date": "not_applicable",
+      "modification_history": ["Patch duplicated to a second location."],
+      "split": "test"
+    },
+    {
+      "id": "forwarded-photo-01",
+      "path": "forwarded/photo_01.jpg",
+      "label": "forwarded",
+      "expected_detection": true,
+      "source_type": "personal",
+      "license": "private-consented",
+      "source": "derived from personal-photo-01 using documented messaging-style re-encode",
+      "source_url": "not_applicable",
+      "attribution_requirements": "not_applicable",
+      "download_date": "not_applicable",
+      "modification_history": ["JPEG re-encoded at quality 65."],
+      "split": "test"
+    },
+    {
+      "id": "opensource-edited-01",
+      "path": "edited/example.jpg",
+      "label": "edited",
+      "expected_detection": true,
+      "source_type": "open_source",
+      "license": "CC-BY-4.0",
+      "source": "https://example.org/source-page",
+      "source_url": "https://example.org/source-page",
+      "attribution_requirements": "Credit the creator and link the license.",
+      "download_date": "2026-11-02",
+      "modification_history": ["Derived from the documented source image by patch insertion."],
+      "split": "test"
+    }
+  ]
+}

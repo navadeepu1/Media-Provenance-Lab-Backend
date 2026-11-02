@@ -2,11 +2,27 @@
 
 ## Chosen Vertical
 
-**Media provenance and evidence** is the working vertical assumption because the challenge document supplied with this build did not include a named vertical. The exact challenge vertical and track should replace this sentence before submission.
+**Media provenance and evidence** is the working vertical assumption. The
+supplied challenge brief requires choosing one provided vertical, but does not
+identify the selected vertical/track. The stated deadline is **November 6,
+2026**.
 
-## Live Demo:
+### Challenge submission constraints
 
-Live deployment: **not deployed yet**. The first Render free-plan load can take up to a minute. Judge path: open the link, click a synthetic sample, watch the named modules progress, read the evidence tier and rule, open a heatmap, download the offline HTML, and open the methodology endpoint.
+- The repository must be public and smaller than 10 MB.
+- Keep exactly one branch; this project uses `main`.
+- A maximum of two attempts is allowed.
+- Submit the complete code and this README, including the vertical, approach,
+  logic, operation, and assumptions.
+- Reviewers emphasize code quality, security, efficiency, testing,
+  accessibility, and problem-statement alignment.
+
+## Demo:
+
+No hosted deployment is required for this prototype. Run it locally, click a
+synthetic sample, watch the named modules progress, read the evidence tier and
+rule, open a heatmap, download the offline HTML, and open the methodology
+endpoint.
 
 ## Problem Statement
 
@@ -37,9 +53,10 @@ uvicorn app.main:app --reload
 
 Open `http://127.0.0.1:8000`. The app works offline with no provider keys. To enable the local learned detector, keep `model_int8.onnx` in the project root and set `DETECTOR_LOCAL_PATH=model_int8.onnx` in `.env`; detector failures remain `not_determined`.
 
-## Deploy on Render:
+## Optional Render deployment:
 
-Create a new Blueprint from this repository. `render.yaml` uses Render's native Python runtime, the free plan, `pip install -r requirements.txt`, and `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. Set optional secrets in the Render dashboard. Free services use ephemeral storage and may sleep after inactivity, so reports are not permanent.
+Render configuration is included for future use, but deployment and production
+measurements are not required for this prototype submission.
 
 ## Free Services and Keys:
 
@@ -91,15 +108,29 @@ Controls have visible labels, progress uses `aria-live`, tier text does not rely
 
 ## Assumptions
 
-See [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md). The exact challenge document and its vertical/track were not included in the supplied materials.
+See [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md). The supplied challenge brief identifies the November 6, 2026 deadline and
+submission constraints, but does not identify the selected vertical/track.
 
 ## Limitations:
 
-Free Render cold starts can take up to a minute, local storage is ephemeral, and reports can be lost on restart. C2PA is reported as not checked, the learned detector is not loaded without verified weights, audio is not included, and MP4 frame aggregation is limited in this first implementation.
+Free Render cold starts can take up to a minute, local storage is ephemeral,
+and reports can be lost on restart. C2PA inspection is optional and reports
+`not checked` when its binding is unavailable. The learned detector has
+checksum and failure handling but remains uncalibrated and excluded from
+fusion tiers. Audio is not included, and MP4 aggregation is limited to
+sampled frames.
 
 ## Future Work
 
-The baseline includes SQLAlchemy-backed TTL persistence, verified ONNX checksum handling and calibration tooling, OpenCV video frame aggregation with strongest-frame display, optional C2PA inspection, known-item pHash/dHash context, optional Gemini/Groq explanations with timeout/cache fallback, and keyboard/360px regression tests. Evaluation data, licensed model provenance, and live deployment remain release prerequisites.
+The baseline includes SQLAlchemy-backed TTL persistence, verified ONNX
+checksum handling and calibration tooling, OpenCV video frame aggregation
+with strongest-frame display, optional C2PA inspection, known-item pHash/dHash
+context, optional Gemini/Groq explanations with timeout/cache fallback, real
+dataset evaluation and licensing metadata, and keyboard/360px regression
+tests. Independent labeled evaluation data, licensed model provenance, and live
+deployment are not required to demonstrate the offline prototype. They are
+required only if claiming real-world accuracy, distributing the learned
+detector, or publishing a hosted service.
 
 ## Licences and Credits:
 

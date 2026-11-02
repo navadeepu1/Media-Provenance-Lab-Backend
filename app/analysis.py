@@ -350,9 +350,15 @@ def _copy_move(image: Image.Image) -> Signal:
                       reason=f"Copy-move analysis could not run: {type(exc).__name__}.")
 
 
-def image_signals(image: Image.Image, stem: str, *, from_video: bool = False) -> list[Signal]:
+def image_signals(
+    image: Image.Image,
+    stem: str,
+    *,
+    from_video: bool = False,
+    quality_image: Image.Image | None = None,
+) -> list[Signal]:
     derived = settings.derived_dir
-    ok, reason = _quality_gate(image)
+    ok, reason = _quality_gate(quality_image or image)
     signals: list[Signal] = []
     if ok:
         if from_video:
@@ -422,14 +428,30 @@ def _analyze_image(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
         image.load()
     except Exception as exc:
         raise media.UploadRejected("validation_error", "The file could not be read as a photo.", 422) from exc
-    signals = image_signals(image, stem)
+    original_size = image.size
+    analysis_image = image.copy()
+    analysis_image.thumbnail(
+        (settings.analysis_max_side, settings.analysis_max_side),
+        Image.Resampling.LANCZOS,
+    )
+    resized = analysis_image.size != original_size
+    signals = image_signals(analysis_image, stem, quality_image=image)
     tier, rule = _fused(signals)
     limitations = _collect_limitations(signals)
+    if resized:
+        limitations.append(
+            f"Forensic modules used a downscaled {analysis_image.width}x"
+            f"{analysis_image.height} working image; the original was "
+            f"{original_size[0]}x{original_size[1]}."
+        )
     explanation, source = explain(_explanation_input(tier, rule, signals, limitations))
     provenance_data = provenance(image, raw)
+    provenance_data["original_dimensions"] = list(original_size)
+    provenance_data["analysis_dimensions"] = list(analysis_image.size)
+    provenance_data["analysis_resized"] = resized
     provenance_data["c2pa"] = c2pa.inspect_bytes(raw, ".jpg")
     return _report(report_id, tier, rule, signals, provenance_data, limitations,
-                   explanation, source, demo, known_matches=known_items.match(image))
+                   explanation, source, demo, known_matches=known_items.match(analysis_image))
 
 
 @dataclass(frozen=True)

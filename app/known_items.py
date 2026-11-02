@@ -11,9 +11,13 @@ from PIL import Image
 from .config import settings
 from .db import known_items
 
+HASH_MAX_SIDE = 1024
+
 
 def hashes(image: Image.Image) -> tuple[str, str]:
     rgb = image.convert("RGB")
+    if max(rgb.size) > HASH_MAX_SIDE:
+        rgb.thumbnail((HASH_MAX_SIDE, HASH_MAX_SIDE), Image.Resampling.LANCZOS)
     return str(imagehash.phash(rgb)), str(imagehash.dhash(rgb))
 
 
