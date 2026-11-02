@@ -1,137 +1,468 @@
 # Media Provenance Lab
 
-## Chosen Vertical
+Media Provenance Lab is an offline-first prototype for inspecting image and
+video provenance signals. It does not claim that a file is definitively
+“real” or “fake”. Instead, it combines several explainable signals and reports
+an evidence tier, limitations, and supporting heatmaps.
 
-**Media provenance and evidence** is the working vertical assumption. The
-supplied challenge brief requires choosing one provided vertical, but does not
-identify the selected vertical/track. The stated deadline is **November 6,
-2026**.
+The prototype is suitable for local demonstration. A hosted deployment,
+provider API key, external dataset, and learned detector are **not required**
+to run the basic application.
 
-### Challenge submission constraints
+## 1. What the application does
 
+The application can:
+
+- validate image and video file signatures and size limits;
+- inspect dimensions, format, metadata, and optional C2PA provenance;
+- calculate tiled Error Level Analysis (ELA);
+- calculate tiled noise residual signals;
+- check for spatially validated copy-move regions;
+- compare against optional known-item references;
+- sample video frames and summarize frame-level evidence;
+- apply deterministic R1-R4 fusion rules;
+- show evidence, limitations, and heatmaps in the browser;
+- export a completed report as offline HTML;
+- evaluate labeled images through a manifest;
+- generate reproducible derived examples for evaluation.
+
+The optional ONNX learned detector is disabled unless a verified local model is
+configured. If it is unavailable or fails, the result is reported as
+`not_determined`; the application does not silently treat that as a clean
+result.
+
+## 2. Challenge submission information
+
+- Deadline: **November 6, 2026**.
 - The repository must be public and smaller than 10 MB.
-- Keep exactly one branch; this project uses `main`.
+- Keep exactly one branch: `main`.
 - A maximum of two attempts is allowed.
-- Submit the complete code and this README, including the vertical, approach,
-  logic, operation, and assumptions.
-- Reviewers emphasize code quality, security, efficiency, testing,
+- The submission should include the complete code and this README.
+- Review areas include code quality, security, efficiency, testing,
   accessibility, and problem-statement alignment.
 
-## Demo:
+The selected challenge vertical should be named in the final submission
+description. The working vertical for this project is **media provenance and
+evidence**.
 
-No hosted deployment is required for this prototype. Run it locally, click a
-synthetic sample, watch the named modules progress, read the evidence tier and
-rule, open a heatmap, download the offline HTML, and open the methodology
-endpoint.
+## 3. Requirements
 
-## Problem Statement
+### Required for the basic prototype
 
-Images are often copied, recompressed, or edited, but a binary verdict hides uncertainty. This app presents reproducible signals and their limits in plain English.
+- Windows, macOS, or Linux;
+- Python **3.12**;
+- Git, if cloning the repository;
+- approximately 2 GB of free disk space for Python packages and temporary
+  files;
+- a modern browser such as Chrome, Edge, or Firefox.
 
-## Approach and Logic
+No API key, Render account, ONNX model, or external image dataset is required
+for the basic demonstration.
 
-The pipeline validates file signatures and dimensions, reads non-sensitive provenance context including optional C2PA capability status, runs tiled ELA, tiled noise residual, and spatially validated ORB copy-move checks, then applies deterministic R1-R4 fusion rules. Missing optional detector weights produce `not_determined`, never a silent clean result.
+### Optional components
 
-## How the Solution Works
+| Component | Purpose | Required? |
+|---|---|---:|
+| `c2pa-python` | Read C2PA manifests when available | No |
+| ONNX model | Add a learned detector signal | No |
+| Gemini or Groq key | Generate optional explanation prose | No |
+| Hugging Face token | Access a private/model-hosting workflow | No |
+| Render | Host the application publicly | No |
+| Real licensed dataset | Make general accuracy claims | No, prototype only |
 
-Uploads become asynchronous jobs. Each completed job stores a report with signals, heatmaps, limitations, and exportable HTML. The API and static UI share one origin.
+## 4. Get the project
 
-## Architecture:
+### Option A: clone with Git
 
-```text
-Browser -> FastAPI routes -> async job -> Pillow/OpenCV analysis -> Report + PNG heatmaps
-                                  |-> deterministic fusion -> JSON/API and offline HTML export
-```
-
-## Setup and Run:
-
-Use Python 3.12, create a virtual environment, install `requirements-dev.txt`, then run:
+Open PowerShell and run:
 
 ```powershell
-uvicorn app.main:app --reload
+cd "N:\"
+git clone https://github.com/navadeepu1/Media-Provenance-Lab-Backend.git
+cd "Media-Provenance-Lab-Backend"
 ```
 
-Open `http://127.0.0.1:8000`. The app works offline with no provider keys. To enable the local learned detector, keep `model_int8.onnx` in the project root and set `DETECTOR_LOCAL_PATH=model_int8.onnx` in `.env`; detector failures remain `not_determined`.
+Replace `N:\` with the folder where you want to keep the project.
 
-## Optional Render deployment:
+### Option B: download a ZIP
 
-Render configuration is included for future use, but deployment and production
-measurements are not required for this prototype submission.
+1. Open the GitHub repository page.
+2. Select **Code** and then **Download ZIP**.
+3. Extract the ZIP using File Explorer.
+4. Open PowerShell in the extracted folder.
 
-## Free Services and Keys:
+The folder must contain `app`, `scripts`, `tests`, `requirements.txt`, and
+`requirements-dev.txt`. Do not run commands from the parent folder.
 
-| Service | Purpose | Required | Free-tier summary | Sign-up |
-|---|---|---:|---|---|
-| Render | Web hosting | Yes | Free web service with sleep and ephemeral filesystem | https://render.com |
-| Gemini or Groq | Optional explanation prose | No | Provider free tier, subject to current provider terms | Provider websites |
-| Hugging Face | Optional model download | No | Optional public model access | https://huggingface.co |
+## 5. Create the Python environment
 
-## API Reference:
+From the repository root, create a virtual environment:
+
+```powershell
+py -3.12 -m venv .venv
+```
+
+Activate it:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+If PowerShell blocks activation, either use the Python executable directly as
+shown below or run PowerShell with a user-scoped execution-policy change:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+Install the runtime and development dependencies:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+The development requirements include the runtime packages, pytest, coverage,
+ONNX inspection support, and process-memory tools used by the tests and smoke
+checks.
+
+## 6. Configure local settings
+
+The application has safe defaults and works without an environment file. To
+customize settings, copy the example:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+For the basic prototype, leave provider keys empty and keep:
+
+```text
+AI_PROVIDER=none
+DETECTOR_LOCAL_PATH=model_int8.onnx
+```
+
+The detector remains inactive unless `model_int8.onnx` exists and its checksum
+matches the configured value. Do not download or commit an unknown model just
+to remove this optional status.
+
+Important default safety limits include:
+
+- maximum image size: 10 MB;
+- maximum video size: 25 MB;
+- maximum decoded image pixels: 16 million;
+- maximum image side: 5,000 pixels;
+- analysis downscale side: 2,048 pixels.
+
+Accepted large images are downscaled only for in-memory forensic processing.
+Original dimensions and provenance checks are preserved.
+
+## 7. Start the application
+
+From the repository root, with the virtual environment active:
+
+```powershell
+python -m uvicorn app.main:app --reload
+```
+
+When the server starts, open:
+
+```text
+http://127.0.0.1:8000
+```
+
+To stop the server, return to PowerShell and press `Ctrl+C`.
+
+If the `python` command is using the wrong interpreter, run the virtual
+environment interpreter explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+## 8. Use the browser interface
+
+1. Open `http://127.0.0.1:8000`.
+2. Choose a built-in synthetic sample, or select an image/video file from your
+   computer.
+3. Start the analysis.
+4. Wait for the asynchronous job to finish.
+5. Review:
+   - the evidence tier;
+   - the deterministic rule that produced it;
+   - individual ELA, noise, copy-move, provenance, and detector signals;
+   - limitations and `not_determined` statuses;
+   - heatmaps and strongest video frames, when available.
+6. Open the report export to download an offline HTML copy.
+
+The report is evidence-oriented. A strong signal is not proof of manipulation,
+and an authentic image may contain compression or editing artifacts.
+
+## 9. API endpoints
+
+The browser uses the same-origin FastAPI API. The main endpoints are:
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/v1/health` | Health and optional dependency status |
-| GET | `/api/v1/samples` | Synthetic demo gallery |
-| POST | `/api/v1/analyze` | Start an upload analysis |
-| POST | `/api/v1/samples/{id}/analyze` | Start a real sample analysis |
-| GET | `/api/v1/jobs/{id}` | Poll job progress |
-| GET | `/api/v1/reports/{id}` | Read report JSON |
-| GET | `/api/v1/reports/{id}/export` | Download offline HTML |
-| GET | `/api/v1/methodology` | Rules and limitations |
+| `GET` | `/api/v1/health` | Check service and optional dependency status |
+| `GET` | `/api/v1/samples` | List built-in synthetic samples |
+| `POST` | `/api/v1/analyze` | Start an uploaded file analysis |
+| `POST` | `/api/v1/samples/{id}/analyze` | Analyze a built-in sample |
+| `GET` | `/api/v1/jobs/{id}` | Poll asynchronous job progress |
+| `GET` | `/api/v1/reports/{id}` | Read a completed JSON report |
+| `GET` | `/api/v1/reports/{id}/export` | Download offline HTML |
+| `GET` | `/api/v1/methodology` | Read rules and limitations |
 
-## Evaluation Results:
-
-The reproducible synthetic evaluation manifest and results are in
-[eval/manifest.json](eval/manifest.json) and [eval/results.json](eval/results.json).
-Regenerate them with `python scripts/generate_eval.py`. These are regression
-measurements on original CC0-1.0 synthetic content, not real-world accuracy.
-
-## Testing:
+Quick health check from PowerShell:
 
 ```powershell
-pip install -r requirements-dev.txt
-pytest --cov=app --cov-report=term-missing
-python scripts/generate_eval.py
+Invoke-RestMethod http://127.0.0.1:8000/api/v1/health
+```
+
+The upload endpoint expects a multipart form field named `file`. For example,
+using the `curl.exe` included with Windows:
+
+```powershell
+curl.exe -X POST `
+  -F "file=@.\path\to\image.jpg" `
+  http://127.0.0.1:8000/api/v1/analyze
+```
+
+The response contains a job ID. Poll the job endpoint until it is complete,
+then request the report endpoint using the returned report ID.
+
+## 10. Run the automated tests
+
+With the virtual environment active:
+
+```powershell
+python -m pytest -q
+```
+
+Run tests with coverage:
+
+```powershell
+python -m pytest --cov=app --cov-report=term-missing
+```
+
+The test suite covers analysis, API behavior, safety limits, detector failure
+handling, forensic fixtures, evaluation manifests, and generated categories.
+
+Run the repository checks:
+
+```powershell
 python scripts/check_secrets.py
 python scripts/check_repo_size.py
 ```
 
-CI runs the same test suite on every push. Coverage exclusions are not configured.
+The GitHub Actions workflow runs the test suite, synthetic evaluation, secret
+scan, and repository-size check on pushes and pull requests.
 
-## Security and Privacy Notes
+## 11. Run the synthetic evaluation
 
-Uploads are capped and checked by magic bytes. Client filenames are ignored. Analysis requests have a bounded per-IP rate limit, request IDs are returned for support, and `CORS_ORIGINS` enables an explicit origin allowlist when needed. GPS coordinates are never returned, and the optional explainer receives only report JSON. Reports and jobs are stored in SQLite with restart recovery and cleanup hooks. The free-host filesystem remains ephemeral, so the data survives normal requests but not a Render restart or redeploy.
+The built-in evaluation is a regression check using fixed-seed synthetic
+content:
 
-## Accessibility Notes
+```powershell
+python scripts/generate_eval.py
+```
 
-Controls have visible labels, progress uses `aria-live`, tier text does not rely on color, links open with `noopener noreferrer`, and the layout adapts to narrow screens.
+Results are written under `eval`. These results verify repeatability and
+regressions; they are **not real-world accuracy measurements**.
 
-## Assumptions
+## 12. Evaluate real images with a manifest
 
-See [docs/ASSUMPTIONS.md](docs/ASSUMPTIONS.md). The supplied challenge brief identifies the November 6, 2026 deadline and
-submission constraints, but does not identify the selected vertical/track.
+The real-data evaluator does not treat a folder name as truth. Every image
+must have a manifest record containing a verified label and provenance
+metadata.
 
-## Limitations:
+Copy the example manifest:
 
-Free Render cold starts can take up to a minute, local storage is ephemeral,
-and reports can be lost on restart. C2PA inspection is optional and reports
-`not checked` when its binding is unavailable. The learned detector has
-checksum and failure handling but remains uncalibrated and excluded from
-fusion tiers. Audio is not included, and MP4 aggregation is limited to
-sampled frames.
+```powershell
+Copy-Item eval\real_manifest.example.json eval_data\manifest.json
+```
 
-## Future Work
+Fill in the records and ensure the referenced files exist below `eval_data`.
+Supported labels include:
 
-The baseline includes SQLAlchemy-backed TTL persistence, verified ONNX
-checksum handling and calibration tooling, OpenCV video frame aggregation
-with strongest-frame display, optional C2PA inspection, known-item pHash/dHash
-context, optional Gemini/Groq explanations with timeout/cache fallback, real
-dataset evaluation and licensing metadata, and keyboard/360px regression
-tests. Independent labeled evaluation data, licensed model provenance, and live
-deployment are not required to demonstrate the offline prototype. They are
-required only if claiming real-world accuracy, distributing the learned
-detector, or publishing a hosted service.
+- `authentic`
+- `recompressed`
+- `spliced`
+- `copy_moved`
+- `forwarded`
+- `ai_generated`
 
-## Licences and Credits:
+Each record needs a label, expected detection value, source type, license,
+source description, split, file path, modification history, and appropriate
+source or consent information. Open-source records need a source URL, license,
+attribution requirements, and download date. Personal records should use
+`source_url: "not_applicable"` and a non-sensitive consent record.
 
-Application code is available under the repository's chosen open-source licence. Pillow, NumPy, OpenCV, imagehash, piexif, FastAPI, and SQLAlchemy remain under their respective upstream licences. No third-party dataset or detector weights are bundled.
+Run:
+
+```powershell
+python scripts/evaluate_dataset.py
+```
+
+The output is `eval\real_results.json` and includes file hashes, dimensions,
+format, confusion matrix, precision, recall, and per-class results. If labels
+or required provenance fields are missing, the command refuses to produce
+misleading metrics.
+
+## 13. Create derived evaluation categories
+
+If you have consented authentic images, the preparation script can create
+recompressed, forwarded, spliced, and copy-moved examples:
+
+```powershell
+python scripts/prepare_eval_dataset.py `
+  --source-type personal `
+  --license private-consented `
+  --source "captured by project contributor"
+```
+
+For an open-source image, use the actual source page and metadata:
+
+```powershell
+python scripts/prepare_eval_dataset.py `
+  --source-type open_source `
+  --license CC-BY-4.0 `
+  --source "Creator name, original image" `
+  --source-url "https://example.org/original-image" `
+  --attribution-requirements "Credit creator and link the license." `
+  --download-date 2026-11-02
+```
+
+All variants derived from one original must stay in the same split. Otherwise,
+the evaluator can compare nearly identical files across training and test
+groups and produce an inflated result.
+
+The preparation script deliberately does not fabricate `ai_generated`
+examples. Such files must be independently sourced and documented.
+
+## 14. Calibrate forensic thresholds
+
+Calibration is advisory and must use a reviewed, leakage-free validation
+split containing authentic and edited examples:
+
+```powershell
+python scripts/calibrate_forensics.py
+```
+
+The output is `eval\forensic_calibration.json`. It proposes thresholds for
+review; it does not change production thresholds automatically. Do not update
+production thresholds based only on a small personal folder or derived
+examples.
+
+## 15. Optional detector and licensing requirements
+
+The prototype does not require the learned detector. The detector should only
+be distributed or enabled after its provenance is verified. Required evidence
+includes:
+
+1. original upstream repository or download page;
+2. exact immutable commit, release, or model revision;
+3. model author or organization;
+4. model and dataset license;
+5. permission to redistribute the model artifact;
+6. download URL and SHA-256 checksum;
+7. any required attribution or notice.
+
+If this evidence is unavailable, leave the detector disabled. The
+rule-based forensic pipeline remains usable.
+
+## 16. Security, privacy, and data handling
+
+- Do not commit `.env`, API keys, private consent details, or private images.
+- Client filenames are not trusted as identifiers.
+- Uploads are checked by file signature and bounded by size and dimension
+  limits.
+- Personal images should remain local and should not be pushed to GitHub.
+- `eval_data` and generated real-evaluation outputs are ignored by Git.
+- GPS coordinates are not returned in reports.
+- Provider keys belong only in an untracked local `.env` or private deployment
+  settings.
+- Reports and jobs use local SQLite storage during development.
+
+## 17. Troubleshooting
+
+### `ModuleNotFoundError: No module named 'app'`
+
+Confirm that PowerShell is in the repository root:
+
+```powershell
+Get-ChildItem app
+```
+
+Activate `.venv`, then run commands through `python -m`, for example:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+### `No module named ...` during installation
+
+Upgrade pip and reinstall from the repository root:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install -r requirements-dev.txt
+```
+
+### `Could not read manifest`
+
+Create `eval_data\manifest.json` from the example and verify that every
+manifest path is relative to `eval_data`, for example
+`authentic\photo_01.jpg`.
+
+### Analysis is slow or stops on a large image
+
+Use the current bounded configuration. Do not remove the byte, pixel, or side
+limits. Accepted images are downscaled for analysis to control memory use.
+
+### The learned detector is `not_determined`
+
+This is expected when no verified ONNX model is configured. It is not a
+failure of the core prototype.
+
+## 18. Repository structure
+
+```text
+app\                         Application and analysis pipeline
+app\static\                  Browser interface
+tests\                       Automated tests
+scripts\                     Evaluation, calibration, and maintenance tools
+eval\                        Synthetic manifests and example real-data schema
+eval_data\                   Local ignored evaluation images and manifest
+docs\                        Methodology, limitations, data, and release notes
+requirements.txt             Runtime dependencies
+requirements-dev.txt         Runtime plus test/development dependencies
+render.yaml                  Optional future Render configuration
+```
+
+## 19. Limitations and prototype status
+
+The system provides explainable forensic signals, not legal or scientific
+proof. C2PA support is optional, the learned detector is not enabled by
+default, audio is not analyzed, and video analysis samples frames rather than
+processing every frame continuously.
+
+Independent licensed data, verified detector provenance, hosted deployment,
+and manual assistive-technology testing are additional release-quality
+activities. They are not required to demonstrate the offline prototype.
+
+See:
+
+- [docs/LIMITATIONS.md](docs/LIMITATIONS.md)
+- [docs/METHODOLOGY.md](docs/METHODOLOGY.md)
+- [docs/DATA_SOURCES.md](docs/DATA_SOURCES.md)
+- [docs/REMAINING_DEVELOPMENT.md](docs/REMAINING_DEVELOPMENT.md)
+- [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md)
+- [docs/MODEL_CARD.md](docs/MODEL_CARD.md)
+
+## 20. Licences and credits
+
+Application code is available under the repository's selected open-source
+licence. Pillow, NumPy, OpenCV, imagehash, piexif, FastAPI, SQLAlchemy, and
+other dependencies retain their respective upstream licences. No third-party
+dataset or verified detector weights are bundled.
