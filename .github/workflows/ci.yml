@@ -9,6 +9,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
+      - name: Set repository import path
+        run: echo "PYTHONPATH=${GITHUB_WORKSPACE}" >> "$GITHUB_ENV"
       - run: pytest --cov=app --cov-report=term-missing
       - run: python scripts/generate_eval.py
       - run: python scripts/check_secrets.py
