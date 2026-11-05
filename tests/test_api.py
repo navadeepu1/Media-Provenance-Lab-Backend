@@ -19,7 +19,64 @@ def jpeg():
 def test_health_and_samples():
     with TestClient(app) as client:
         assert client.get("/api/v1/health").status_code == 200
+        ready = client.get("/api/v1/ready")
+        assert ready.status_code == 200
+        assert ready.json()["ready"] is True
+        assert client.get("/api/v1/capabilities").json()["human_review"]["status"] == "local"
         assert len(client.get("/api/v1/samples").json()) >= 7
+
+
+def test_forensic_case_ingestion_timeline_and_custody():
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/cases",
+            json={"title": "Credential access review", "description": "Local test case"},
+        )
+        assert created.status_code == 201
+        case_id = created.json()["id"]
+        evidence = client.post(
+            f"/api/v1/cases/{case_id}/evidence",
+            data={"kind": "json"},
+            files={"file": ("events.json", b'[{"timestamp":"2026-01-01T10:00:00Z","event_type":"login","actor":"alice","summary":"Successful login"}]', "application/json")},
+        )
+        assert evidence.status_code == 201
+        assert evidence.json()["record_count"] == 1
+        timeline = client.get(f"/api/v1/cases/{case_id}/timeline")
+        assert timeline.status_code == 200
+        assert timeline.json()["events"][0]["actor"] == "alice"
+        answer = client.post(
+            f"/api/v1/cases/{case_id}/assistant", json={"question": "alice login"}
+        )
+        assert answer.status_code == 200
+        assert answer.json()["grounded"] is True
+        assert answer.json()["citations"]
+        custody = client.get(f"/api/v1/cases/{case_id}/custody/verify")
+        assert custody.status_code == 200
+        assert custody.json()["valid"] is True
+        anchored = client.post(f"/api/v1/cases/{case_id}/custody/anchor")
+        assert anchored.status_code == 200
+        assert anchored.json()["anchored"] == 1
+        verified = client.get(f"/api/v1/cases/{case_id}/custody/verify")
+        assert verified.json()["anchored"] is True
+        findings = client.get(f"/api/v1/cases/{case_id}/findings")
+        assert findings.status_code == 200
+        assert findings.json()["findings"] == []
+
+
+def test_forensic_authentication_enforces_case_ownership(monkeypatch):
+    monkeypatch.setattr(settings, "authentication_backend", "local_bearer")
+    monkeypatch.setattr(settings, "auth_tokens", "alice:secret,bob:other")
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/cases", json={"title": "Private case"}, headers={"Authorization": "Bearer secret"}
+        )
+        assert created.status_code == 201
+        case_id = created.json()["id"]
+        assert client.get("/api/v1/cases").status_code == 401
+        assert client.get("/api/v1/cases", headers={"Authorization": "Bearer other"}).json()["cases"] == []
+        assert client.get(
+            f"/api/v1/cases/{case_id}/timeline", headers={"Authorization": "Bearer other"}
+        ).status_code == 403
 
 
 def test_upload_runs_real_pipeline():
@@ -36,12 +93,78 @@ def test_upload_runs_real_pipeline():
         report = client.get(f"/api/v1/reports/{job['report_id']}")
         assert report.status_code == 200
         assert report.json()["applied_rule"] in {"R1", "R2", "R3", "R4"}
+        assert report.json()["analysis_metrics"]["total_ms"] >= 0
+        assert report.json()["uncertainty"]["level"] in {"high", "moderate"}
+
+
+def test_running_job_can_be_cancelled():
+    with TestClient(app) as client:
+        response = client.post("/api/v1/analyze", files={"file": ("sample.jpg", jpeg(), "image/jpeg")})
+        job_id = response.json()["job_id"]
+        cancelled = client.post(f"/api/v1/jobs/{job_id}/cancel")
+        assert cancelled.status_code == 200
+        assert cancelled.json()["status"] == "cancellation_requested"
+        for _ in range(300):
+            job = client.get(f"/api/v1/jobs/{job_id}").json()
+            if job["status"] == "failed":
+                break
+            time.sleep(0.01)
+        assert job["error_code"] == "cancelled"
+
+
+def test_job_timeout_is_persisted(monkeypatch):
+    monkeypatch.setattr(settings, "job_budget_seconds", 0)
+    monkeypatch.setattr(main, "analyze_bytes", lambda *args, **kwargs: time.sleep(0.1))
+    with TestClient(app) as client:
+        response = client.post("/api/v1/analyze", files={"file": ("sample.jpg", jpeg(), "image/jpeg")})
+        job_id = response.json()["job_id"]
+        for _ in range(300):
+            job = client.get(f"/api/v1/jobs/{job_id}").json()
+            if job["status"] == "failed":
+                break
+            time.sleep(0.01)
+        assert job["error_code"] == "timeout"
+        assert job["duration_ms"] >= 0
+
+
+def test_review_and_audit_workflow():
+    with TestClient(app) as client:
+        response = client.post("/api/v1/samples/clean/analyze")
+        job_id = response.json()["job_id"]
+        for _ in range(300):
+            job = client.get(f"/api/v1/jobs/{job_id}").json()
+            if job["status"] == "done":
+                break
+            time.sleep(0.01)
+        review = client.post(f"/api/v1/reports/{job['report_id']}/reviews")
+        assert review.status_code == 200
+        updated = client.patch(
+            f"/api/v1/reviews/{review.json()['id']}",
+            json={"status": "completed", "decision": "needs_review", "notes": "Check source context"},
+        )
+        assert updated.status_code == 200
+
+
+def test_audit_requires_admin_key(monkeypatch):
+    monkeypatch.setattr(settings, "admin_api_key", "audit-key")
+    with TestClient(app) as client:
+        assert client.get("/api/v1/admin/audit").status_code == 401
+        assert client.get("/api/v1/admin/audit", headers={"X-Admin-Key": "audit-key"}).status_code == 200
 
 
 def test_invalid_magic_is_rejected():
     with TestClient(app) as client:
         response = client.post("/api/v1/analyze", files={"file": ("sample.jpg", b"not an image", "image/jpeg")})
         assert response.status_code == 415
+
+
+def test_empty_upload_is_rejected_before_analysis():
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/analyze", files={"file": ("empty.jpg", b"", "image/jpeg")}
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "empty_file"
 
 
 def test_security_headers_and_admin_configuration():

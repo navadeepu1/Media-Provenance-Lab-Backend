@@ -1,16 +1,18 @@
 import asyncio
 import html
 import io
+import json
 import logging
 import secrets
 import time
+from contextlib import asynccontextmanager
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Annotated
 
-from fastapi import FastAPI, File, Header, Request, UploadFile
+from fastapi import FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -23,18 +25,108 @@ from .config import settings
 from .db import (
     cleanup_expired,
     create_job,
+    delete_report,
+    expire_overdue_jobs,
+    healthcheck,
     init_db,
+    job_cancel_requested,
     job_dict,
     load_report,
     report_status,
     recover_interrupted_jobs,
     save_report,
+    request_job_cancellation,
     update_job,
 )
 from .detector import get_detector
+from . import forensics
+from .privacy import audit, create_review, recent_events, update_review
+from .queue import status as queue_status
+from .storage import backend_status, put_bytes, secure_delete
 from .schemas import Report, Sample
+from .forensics.models import (
+    BookmarkCreate, CaseCreate, CaseStatusChange, Finding, FindingStatusChange,
+    NoteCreate, NormalizedEvent, TagCreate,
+)
+from .forensics.parsers import parse_firefox, parse_json_csv, parse_linux, parse_web, parse_windows_xml
+from .forensics.persistence import (
+    change_case_status, create_bookmark, create_case as create_v2_case,
+    create_note, create_tag, delete_evidence, ensure_case, get_case, get_evidence,
+    list_bookmarks, list_cases as list_v2_cases, list_evidence, list_notes,
+    list_tags, load_events, load_findings, save_evidence, save_events,
+    save_findings, timeline_filtered, update_finding_status,
+)
+from .forensics.rules import run_all
+from .forensics.incidents import group_incidents, match_sequences
+from .forensics.persistence import load_incidents, save_incidents
+from .forensics.custody import append as append_custody, verify as verify_custody_v2
 
-app = FastAPI(title="Media Provenance Lab", docs_url=None, redoc_url=None)
+logger = logging.getLogger(__name__)
+
+
+def _authenticated_user(authorization: str | None) -> str | None:
+    if settings.authentication_backend == "none":
+        return "local-user"
+    if settings.authentication_backend != "local_bearer":
+        return None
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization[7:].strip()
+    for entry in settings.auth_tokens.split(","):
+        if ":" not in entry:
+            continue
+        username, expected = entry.split(":", 1)
+        if secrets.compare_digest(token, expected):
+            return username.strip() or None
+    return None
+
+
+def _require_case_access(case_id: str, authorization: str | None) -> tuple[str | None, JSONResponse | None]:
+    user = _authenticated_user(authorization)
+    if not user:
+        return None, error("unauthorized", "Authentication is required.", 401)
+    if not forensics.owns_case(case_id, user):
+        return None, error("forbidden", "You do not have access to this case.", 403)
+    return user, None
+
+
+def _log_event(event: str, **fields: object) -> None:
+    logger.info(json.dumps({"event": event, "timestamp": datetime.now(timezone.utc).isoformat(),
+                            **fields}, default=str, sort_keys=True))
+
+
+_cleanup_task: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _cleanup_task, _startup_time
+    _startup_time = time.time()
+    settings.data_dir.mkdir(exist_ok=True)
+    settings.uploads_dir.mkdir(exist_ok=True)
+    settings.derived_dir.mkdir(exist_ok=True)
+    init_db()
+    recovered = recover_interrupted_jobs()
+    if recovered:
+        _log_event("jobs_recovered", count=recovered)
+    if not sample_bytes:
+        sample_bytes.update(fixtures.sample_images())
+    known_items.seed(
+        "known-clean-scene",
+        "Known clean synthetic scene",
+        "Reference image used to demonstrate perceptual matching.",
+        Image.open(io.BytesIO(sample_bytes["known-item"])),
+    )
+    _cleanup_task = asyncio.create_task(_cleanup_loop())
+    try:
+        yield
+    finally:
+        if _cleanup_task:
+            _cleanup_task.cancel()
+            await asyncio.gather(_cleanup_task, return_exceptions=True)
+
+
+app = FastAPI(title="Media Provenance Lab", docs_url=None, redoc_url=None, lifespan=lifespan)
 if settings.cors_origins.strip():
     app.add_middleware(
         CORSMiddleware,
@@ -46,8 +138,6 @@ if settings.cors_origins.strip():
 _startup_time = time.time()
 _rate_limit_lock = Lock()
 _rate_limit_hits: dict[str, deque[float]] = defaultdict(deque)
-_cleanup_task: asyncio.Task | None = None
-logger = logging.getLogger(__name__)
 
 
 def error(code: str, message: str, status: int) -> JSONResponse:
@@ -108,70 +198,78 @@ samples = [
 sample_bytes: dict[str, bytes] = {}
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    global _cleanup_task, _startup_time
-    _startup_time = time.time()
-    settings.data_dir.mkdir(exist_ok=True)
-    settings.uploads_dir.mkdir(exist_ok=True)
-    settings.derived_dir.mkdir(exist_ok=True)
-    init_db()
-    recover_interrupted_jobs()
-    if not sample_bytes:
-        sample_bytes.update(fixtures.sample_images())
-    from PIL import Image
-    import io
-    known_items.seed(
-        "known-clean-scene",
-        "Known clean synthetic scene",
-        "Reference image used to demonstrate perceptual matching.",
-        Image.open(io.BytesIO(sample_bytes["known-item"])),
-    )
-    _cleanup_task = asyncio.create_task(_cleanup_loop())
-
-
 async def _cleanup_loop() -> None:
     while True:
         try:
             await asyncio.sleep(max(0.01, float(settings.cleanup_interval_seconds)))
-            await asyncio.to_thread(cleanup_expired)
+            overdue = await asyncio.to_thread(expire_overdue_jobs)
+            cleanup = await asyncio.to_thread(cleanup_expired)
+            if overdue or any(cleanup.values()):
+                _log_event("maintenance", overdue_jobs=overdue, **cleanup)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Scheduled expired-data cleanup failed")
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    if _cleanup_task:
-        _cleanup_task.cancel()
-        await asyncio.gather(_cleanup_task, return_exceptions=True)
-
-
 async def run_job(job_id: str, raw: bytes, demo: bool) -> None:
+    started = time.perf_counter()
+    job = job_dict(job_id)
+    deadline = job.get("deadline_at") if job else None
     try:
         for module in ("ingest", "provenance", "pixel forensics", "fusion", "explanation"):
             current = job_dict(job_id) or {"progress": 0}
             update_job(job_id, current_module=module, progress=min(90, current["progress"] + 18))
             await asyncio.sleep(0)
-        report = await asyncio.to_thread(analyze_bytes, raw, demo=demo)
+        if job_cancel_requested(job_id):
+            raise asyncio.CancelledError
+        remaining = (deadline - datetime.now(timezone.utc).replace(tzinfo=None)).total_seconds() if deadline else settings.job_budget_seconds
+        report = await asyncio.wait_for(
+            asyncio.to_thread(analyze_bytes, raw, demo=demo),
+            timeout=max(0.01, remaining),
+        )
+        if job_cancel_requested(job_id):
+            raise asyncio.CancelledError
         save_report(report.model_dump(), job_id)
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
         update_job(job_id, status="done", progress=100, report_id=report.report_id,
+                   duration_ms=duration_ms, finished_at=datetime.now(timezone.utc))
+        _log_event("analysis_completed", job_id=job_id, report_id=report.report_id,
+                   duration_ms=duration_ms, tier=report.tier)
+    except asyncio.TimeoutError:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        update_job(job_id, status="failed", error_code="timeout",
+                   error_message="Analysis exceeded its time budget.", duration_ms=duration_ms,
                    finished_at=datetime.now(timezone.utc))
+        _log_event("analysis_timeout", job_id=job_id, duration_ms=duration_ms)
+    except asyncio.CancelledError:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        update_job(job_id, status="failed", error_code="cancelled",
+                   error_message="Analysis was cancelled before completion.", duration_ms=duration_ms,
+                   finished_at=datetime.now(timezone.utc))
+        _log_event("analysis_cancelled", job_id=job_id, duration_ms=duration_ms)
     except ValueError as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
         update_job(job_id, status="failed", error_code="validation_error",
-                   error_message=str(exc), finished_at=datetime.now(timezone.utc))
+                   error_message=str(exc), duration_ms=duration_ms, finished_at=datetime.now(timezone.utc))
+        _log_event("analysis_rejected", job_id=job_id, duration_ms=duration_ms, reason=str(exc))
     except Exception:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
         update_job(job_id, status="failed", error_code="internal_error",
+                   error_message="The analysis failed unexpectedly.", duration_ms=duration_ms,
                    finished_at=datetime.now(timezone.utc))
+        logger.exception("analysis_failed job_id=%s", job_id)
 
 
 async def begin(raw: bytes, demo: bool = False) -> dict:
     job_id = secrets.token_urlsafe(18)
     path = settings.uploads_dir / f"{job_id}.bin"
     path.write_bytes(raw)
-    create_job(job_id, path, demo)
-    update_job(job_id, status="running")
+    deadline = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=settings.job_budget_seconds)
+    create_job(job_id, path, demo, deadline)
+    update_job(job_id, status="running", started_at=datetime.now(timezone.utc))
+    _log_event("analysis_queued", job_id=job_id, demo=demo, bytes=len(raw),
+               deadline_at=deadline.isoformat())
     asyncio.create_task(run_job(job_id, raw, demo))
     return {"job_id": job_id, "status_url": f"/api/v1/jobs/{job_id}", "status": "queued"}
 
@@ -179,12 +277,32 @@ async def begin(raw: bytes, demo: bool = False) -> dict:
 @app.get("/api/v1/health")
 async def health() -> dict:
     detector = get_detector()
-    return {"database": "ok",
+    return {"database": healthcheck(),
+            "queue": queue_status(),
+            "storage": backend_status(),
             "detector": detector.status if detector else "disabled",
             "c2pa": c2pa.capability(),
             "explainer_provider": settings.ai_provider,
             "pipeline_version": "1.0.0",
             "last_startup": _startup_time}
+
+
+@app.get("/api/v1/ready")
+async def readiness() -> dict:
+    checks = {
+        "database": healthcheck(),
+        "queue": queue_status(),
+        "storage": backend_status(),
+        "authentication": settings.authentication_backend,
+    }
+    if settings.app_env == "production":
+        ready = checks == {
+            "database": "ok", "queue": "rq_configured", "storage": "s3",
+            "authentication": "oidc",
+        }
+    else:
+        ready = all(value in {"ok", "inline", "local", "none"} for value in checks.values())
+    return {"ready": ready, "checks": checks}
 
 
 @app.get("/api/v1/samples")
@@ -207,7 +325,15 @@ async def _read_upload(file: UploadFile) -> bytes:
 
 @app.post("/api/v1/analyze", status_code=202)
 async def analyze(file: Annotated[UploadFile, File(...)]) -> dict:
+    if not file.filename or not file.filename.strip():
+        raise media.UploadRejected(
+            "missing_file", "Select a media file before starting analysis.", 422
+        )
     raw = await _read_upload(file)
+    if not raw:
+        raise media.UploadRejected(
+            "empty_file", "The selected media file is empty.", 422
+        )
     media_type = media.sniff_media_type(raw)
     if media_type is None:
         raise media.UploadRejected("invalid_file_type", "Upload a JPEG, PNG, WebP, or MP4 file.", 415)
@@ -238,6 +364,17 @@ async def get_job(job_id: str) -> dict:
     return job
 
 
+@app.post("/api/v1/jobs/{job_id}/cancel")
+async def cancel_job(job_id: str) -> dict:
+    if not request_job_cancellation(job_id):
+        job = job_dict(job_id)
+        if not job:
+            return error("not_found", "Job not found.", 404)
+        return error("not_cancellable", "This job is no longer running.", 409)
+    _log_event("analysis_cancel_requested", job_id=job_id)
+    return {"job_id": job_id, "status": "cancellation_requested"}
+
+
 @app.get("/api/v1/reports/{report_id}")
 async def get_report(report_id: str) -> Report:
     payload = load_report(report_id)
@@ -247,6 +384,519 @@ async def get_report(report_id: str) -> Report:
             return error("expired", "This report has expired.", 410)
         return error("not_found", "Report not found.", 404)
     return Report.model_validate(payload)
+
+
+@app.delete("/api/v1/reports/{report_id}")
+async def delete_report(report_id: str) -> dict:
+    if report_status(report_id) == "missing":
+        return error("not_found", "Report not found.", 404)
+    deleted = await asyncio.to_thread(_delete_report_data, report_id)
+    audit("report_deleted", subject_id=report_id)
+    return {"report_id": report_id, "deleted": deleted}
+
+
+def _delete_report_data(report_id: str) -> bool:
+    return delete_report(report_id)
+
+
+@app.post("/api/v1/reports/{report_id}/reviews")
+async def create_report_review(report_id: str) -> dict:
+    if not load_report(report_id):
+        return error("not_found", "Report not found.", 404)
+    return await asyncio.to_thread(create_review, report_id)
+
+
+@app.patch("/api/v1/reviews/{review_id}")
+async def patch_review(review_id: int, payload: dict[str, str | None]) -> dict:
+    status_value = payload.get("status")
+    if status_value not in {"queued", "in_review", "completed"}:
+        return error("invalid_review_status", "Review status is invalid.", 422)
+    result = await asyncio.to_thread(
+        update_review, review_id, status_value, payload.get("decision"), payload.get("notes")
+    )
+    if result is None:
+        return error("not_found", "Review task not found.", 404)
+    return result
+
+
+@app.post("/api/v1/cases", status_code=201)
+async def create_forensic_case(payload: dict[str, str | None],
+                               authorization: Annotated[str | None, Header()] = None) -> dict:
+    user = _authenticated_user(authorization)
+    if not user:
+        return error("unauthorized", "Authentication is required.", 401)
+    try:
+        return await asyncio.to_thread(
+            forensics.create_case, payload.get("title", ""), payload.get("description") or "", user
+        )
+    except ValueError as exc:
+        return error("invalid_case", str(exc), 422)
+
+
+@app.get("/api/v1/cases")
+async def get_forensic_cases(authorization: Annotated[str | None, Header()] = None) -> dict:
+    user = _authenticated_user(authorization)
+    if not user:
+        return error("unauthorized", "Authentication is required.", 401)
+    cases = await asyncio.to_thread(forensics.list_cases)
+    return {"cases": [case for case in cases if case["owner_id"] == user]}
+
+
+@app.post("/api/v1/cases/{case_id}/evidence", status_code=201)
+async def ingest_forensic_evidence(
+    case_id: str,
+    file: UploadFile = File(...),
+    kind: str = Form(...),
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    _, denial = _require_case_access(case_id, authorization)
+    if denial:
+        return denial
+    raw = await file.read()
+    try:
+        result = await asyncio.to_thread(
+            forensics.ingest_evidence, case_id, file.filename or "evidence", kind, raw
+        )
+        return result
+    except ValueError as exc:
+        return error("invalid_evidence", str(exc), 422)
+
+
+@app.get("/api/v1/cases/{case_id}/timeline")
+async def get_forensic_timeline(case_id: str, q: str = "",
+                                authorization: Annotated[str | None, Header()] = None) -> dict:
+    _, denial = _require_case_access(case_id, authorization)
+    if denial:
+        return denial
+    return {"events": await asyncio.to_thread(forensics.timeline, case_id, q)}
+
+
+@app.post("/api/v1/cases/{case_id}/assistant")
+async def ask_forensic_assistant(case_id: str, payload: dict[str, str | None],
+                                 authorization: Annotated[str | None, Header()] = None) -> dict:
+    _, denial = _require_case_access(case_id, authorization)
+    if denial:
+        return denial
+    try:
+        return await asyncio.to_thread(
+            forensics.assistant_answer, case_id, payload.get("question") or ""
+        )
+    except ValueError as exc:
+        return error("invalid_question", str(exc), 422)
+
+
+@app.get("/api/v1/cases/{case_id}/custody/verify")
+async def verify_forensic_custody(case_id: str,
+                                  authorization: Annotated[str | None, Header()] = None) -> dict:
+    _, denial = _require_case_access(case_id, authorization)
+    if denial:
+        return denial
+    return await asyncio.to_thread(forensics.verify_custody, case_id)
+
+
+@app.post("/api/v1/cases/{case_id}/custody/anchor")
+async def anchor_forensic_custody(case_id: str,
+                                  authorization: Annotated[str | None, Header()] = None) -> dict:
+    _, denial = _require_case_access(case_id, authorization)
+    if denial:
+        return denial
+    return await asyncio.to_thread(forensics.anchor_custody, case_id)
+
+
+@app.get("/api/v1/cases/{case_id}/findings")
+async def get_forensic_findings(case_id: str,
+                                authorization: Annotated[str | None, Header()] = None) -> dict:
+    _, denial = _require_case_access(case_id, authorization)
+    if denial:
+        return denial
+    return {"findings": await asyncio.to_thread(forensics.suspicious_activity, case_id)}
+
+
+@app.get("/api/v1/admin/audit")
+async def audit_events(x_admin_key: Annotated[str | None, Header()] = None) -> dict:
+    if not settings.admin_api_key:
+        return error("service_unavailable", "Audit access is not configured.", 503)
+    if not x_admin_key or not secrets.compare_digest(x_admin_key, settings.admin_api_key):
+        return error("unauthorized", "The admin key is not valid.", 401)
+    return {"events": await asyncio.to_thread(recent_events)}
+
+
+@app.get("/api/v2/health")
+async def v2_health() -> dict:
+    return {"status": "ok", "api": "v2", "rules": ["R-LOGIN-BURST", "R-OFFHOURS",
+                                                       "R-PRIV-ESC", "R-ACCESS-BURST", "R-DELETE-BURST"]}
+
+
+@app.post("/api/v2/cases/{case_id}/evidence", status_code=201)
+async def v2_ingest_evidence(
+    case_id: str,
+    file: UploadFile = File(...),
+    parser: str = Form(...),
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    raw = await file.read()
+    evidence_id = secrets.token_hex(16)
+    await asyncio.to_thread(ensure_case, tenant_id, case_id)
+    sha256 = __import__("hashlib").sha256(raw).hexdigest()
+    storage_key = await asyncio.to_thread(put_bytes, raw, f"v2/{tenant_id}/{case_id}", evidence_id)
+    if parser in {"json", "csv"}:
+        events, warnings = await asyncio.to_thread(parse_json_csv, raw, tenant_id, case_id, evidence_id, parser)
+    elif parser == "linux_auth":
+        events, warnings = await asyncio.to_thread(parse_linux, raw, tenant_id, case_id, evidence_id)
+    elif parser == "web_access":
+        events, warnings = await asyncio.to_thread(parse_web, raw, tenant_id, case_id, evidence_id)
+    elif parser == "windows_xml":
+        events, warnings = await asyncio.to_thread(parse_windows_xml, raw, tenant_id, case_id, evidence_id)
+    elif parser == "firefox_history":
+        events, warnings = await asyncio.to_thread(parse_firefox, raw, tenant_id, case_id, evidence_id)
+    else:
+        return error("unsupported_parser", "Parser must be json, csv, linux_auth, web_access, windows_xml, or firefox_history.", 422)
+    await asyncio.to_thread(save_evidence, tenant_id, case_id, evidence_id,
+                            file.filename or evidence_id, len(raw), sha256, parser,
+                            storage_key, file.content_type or "application/octet-stream")
+    count = await asyncio.to_thread(save_events, events)
+    await asyncio.to_thread(append_custody, tenant_id, evidence_id, "ingest",
+                            sha256, tenant_id)
+    findings_models = run_all(events) + match_sequences(events)
+    findings = await asyncio.to_thread(save_findings, findings_models)
+    incidents = await asyncio.to_thread(group_incidents, events, findings_models)
+    await asyncio.to_thread(save_incidents, incidents, tenant_id, case_id)
+    audit("v2_evidence_ingested", subject_id=evidence_id, tenant_id=tenant_id,
+          case_id=case_id, parser=parser, event_count=count)
+    return {"evidence_id": evidence_id, "parser": parser, "event_count": count,
+            "finding_count": findings, "parse_warnings": warnings,
+            "sha256": sha256}
+
+
+@app.post("/api/v2/cases", status_code=201)
+async def v2_create_case(
+    payload: CaseCreate,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    result = await asyncio.to_thread(create_v2_case, tenant_id, payload.title)
+    audit("v2_case_created", subject_id=result["id"], tenant_id=tenant_id)
+    return result
+
+
+@app.get("/api/v2/cases")
+async def v2_list_cases(
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    return {"cases": await asyncio.to_thread(list_v2_cases, tenant_id)}
+
+
+@app.get("/api/v2/cases/{case_id}")
+async def v2_get_case(
+    case_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    result = await asyncio.to_thread(get_case, tenant_id, case_id)
+    return result or error("not_found", "Case not found.", 404)
+
+
+@app.patch("/api/v2/cases/{case_id}/status")
+async def v2_change_case_status(
+    case_id: str,
+    payload: CaseStatusChange,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    try:
+        result = await asyncio.to_thread(
+            change_case_status, tenant_id, case_id, payload.status, payload.reason
+        )
+    except ValueError as exc:
+        return error("invalid_status_transition", str(exc), 422)
+    if result is None:
+        return error("not_found", "Case not found.", 404)
+    audit("v2_case_status_changed", subject_id=case_id, tenant_id=tenant_id,
+          status=payload.status)
+    return result
+
+
+@app.get("/api/v2/cases/{case_id}/evidence")
+async def v2_list_evidence(
+    case_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    return {"evidence": await asyncio.to_thread(list_evidence, tenant_id, case_id)}
+
+
+@app.get("/api/v2/evidence/{evidence_id}")
+async def v2_get_evidence(
+    evidence_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    result = await asyncio.to_thread(get_evidence, tenant_id, evidence_id)
+    return result or error("not_found", "Evidence not found.", 404)
+
+
+@app.delete("/api/v2/evidence/{evidence_id}")
+async def v2_delete_evidence(
+    evidence_id: str,
+    hard: bool = False,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    user = _authenticated_user(authorization)
+    if not user:
+        return error("unauthorized", "Authentication is required.", 401)
+    if hard and user != "admin":
+        return error("forbidden", "Only an administrator can hard-delete evidence.", 403)
+    result = await asyncio.to_thread(delete_evidence, user, evidence_id, hard)
+    if not result:
+        return error("not_found", "Evidence not found.", 404)
+    if hard:
+        await asyncio.to_thread(secure_delete, result["storage_key"])
+    audit("v2_evidence_deleted", subject_id=evidence_id, tenant_id=user, hard=hard)
+    return result
+
+
+@app.post("/api/v2/cases/{case_id}/notes", status_code=201)
+async def v2_create_note(
+    case_id: str,
+    payload: NoteCreate,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    result = await asyncio.to_thread(create_note, tenant_id, case_id, tenant_id, payload.text)
+    audit("v2_note_created", subject_id=result["id"], tenant_id=tenant_id, case_id=case_id)
+    return result
+
+
+@app.get("/api/v2/cases/{case_id}/notes")
+async def v2_list_notes(
+    case_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    return {"notes": await asyncio.to_thread(list_notes, tenant_id, case_id)}
+
+
+@app.post("/api/v2/cases/{case_id}/tags", status_code=201)
+async def v2_create_tag(
+    case_id: str,
+    payload: TagCreate,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    result = await asyncio.to_thread(create_tag, tenant_id, case_id, payload.name)
+    audit("v2_case_tagged", subject_id=result["id"], tenant_id=tenant_id, case_id=case_id)
+    return result
+
+
+@app.get("/api/v2/cases/{case_id}/tags")
+async def v2_list_tags(
+    case_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    return {"tags": await asyncio.to_thread(list_tags, tenant_id, case_id)}
+
+
+@app.post("/api/v2/cases/{case_id}/bookmarks", status_code=201)
+async def v2_create_bookmark(
+    case_id: str,
+    payload: BookmarkCreate,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    try:
+        result = await asyncio.to_thread(
+            create_bookmark, tenant_id, case_id, payload.event_id, payload.finding_id
+        )
+    except ValueError as exc:
+        return error("invalid_bookmark", str(exc), 422)
+    audit("v2_bookmark_created", subject_id=result["id"], tenant_id=tenant_id, case_id=case_id)
+    return result
+
+
+@app.get("/api/v2/cases/{case_id}/bookmarks")
+async def v2_list_bookmarks(
+    case_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    return {"bookmarks": await asyncio.to_thread(list_bookmarks, tenant_id, case_id)}
+
+
+@app.patch("/api/v2/findings/{finding_id}/status")
+async def v2_update_finding_status(
+    finding_id: str,
+    payload: FindingStatusChange,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    try:
+        result = await asyncio.to_thread(
+            update_finding_status, tenant_id, finding_id, payload.status, payload.reason
+        )
+    except ValueError as exc:
+        return error("invalid_finding_status", str(exc), 422)
+    if result is None:
+        return error("not_found", "Finding not found.", 404)
+    audit("v2_finding_status_changed", subject_id=finding_id, tenant_id=tenant_id,
+          status=payload.status)
+    return result
+
+
+@app.get("/api/v2/cases/{case_id}/timeline")
+async def v2_timeline(
+    case_id: str,
+    actor: str | None = None,
+    host: str | None = None,
+    source_type: str | None = None,
+    action: str | None = None,
+    minimum_severity: str | None = None,
+    from_time: datetime | None = None,
+    to_time: datetime | None = None,
+    incident: str | None = None,
+    cursor: str | None = None,
+    limit: int = 100,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    result = await asyncio.to_thread(
+        timeline_filtered, tenant_id, case_id, actor, host, source_type, action,
+        minimum_severity, from_time, to_time, incident, cursor, limit
+    )
+    result["events"] = [event.model_dump(mode="json") for event in result["events"]]
+    return result
+
+
+@app.get("/api/v2/cases/{case_id}/findings")
+async def v2_findings(
+    case_id: str,
+    minimum_severity: str | None = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    findings = await asyncio.to_thread(load_findings, tenant_id, case_id)
+    order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    minimum = order.get(minimum_severity or "low", 0)
+    filtered = [finding for finding in findings if order.get(finding.severity, 0) >= minimum]
+    return {"findings": [finding.model_dump(mode="json") for finding in filtered]}
+
+
+@app.get("/api/v2/cases/{case_id}/incidents")
+async def v2_incidents(
+    case_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    if not await asyncio.to_thread(get_case, tenant_id, case_id):
+        return error("not_found", "Case not found.", 404)
+    return {"incidents": await asyncio.to_thread(load_incidents, tenant_id, case_id)}
+
+
+@app.get("/api/v2/evidence/{evidence_id}/custody")
+async def v2_custody(
+    evidence_id: str,
+    authorization: Annotated[str | None, Header()] = None,
+) -> dict:
+    tenant_id = _authenticated_user(authorization)
+    if not tenant_id:
+        return error("unauthorized", "Authentication is required.", 401)
+    return await asyncio.to_thread(verify_custody_v2, tenant_id, evidence_id)
+
+
+@app.get("/api/v1/capabilities")
+async def capabilities() -> dict:
+    return {
+        "adaptive_video": {
+            "status": "partial",
+            "details": "Bounded one-frame-per-second sampling is implemented; adaptive/full-video analysis is not enabled.",
+        },
+        "audio_sync": {
+            "status": "not_configured",
+            "details": "Audio extraction and audiovisual synchronization require an approved ffmpeg deployment.",
+        },
+        "url_ingestion": {
+            "status": "not_configured",
+            "details": "Direct upload is enabled; URL ingestion is disabled until SSRF controls and provider terms are reviewed.",
+        },
+        "suspicious_activity": {
+            "status": "local",
+            "details": "Deterministic findings flag privilege, destructive, authentication-failure, and access activity with event citations.",
+        },
+        "authentication": {
+            "status": settings.authentication_backend,
+            "details": "Use AUTHENTICATION_BACKEND=local_bearer and AUTH_TOKENS=username:token pairs for local ownership enforcement; OIDC remains deployment-specific.",
+        },
+        "custody_anchoring": {
+            "status": "local_file",
+            "details": "Latest custody hashes can be anchored to a separately retained local file; a trusted third-party timestamp service is not bundled.",
+        },
+        "c2pa_chain": {
+            "status": "partial",
+            "details": "Optional C2PA manifest capability/status is reported; signing and full chain visualization are not enabled.",
+        },
+        "human_review": {
+            "status": "local",
+            "details": "Review task creation and status updates are available in local mode; authentication and assignment are not enabled.",
+        },
+        "digital_forensics": {
+            "status": "local",
+            "details": "Cases, JSON/JSONL, CSV, text-log, and filesystem-metadata ingestion, normalized timelines, cited local queries, and custody verification are enabled.",
+        },
+        "model_monitoring": {
+            "status": "not_configured",
+            "details": "Report timing and tier metrics are recorded; drift storage, baselines, and alerting remain to be configured.",
+        },
+    }
 
 
 @app.get("/api/v1/reports/{report_id}/heatmaps/{name}")

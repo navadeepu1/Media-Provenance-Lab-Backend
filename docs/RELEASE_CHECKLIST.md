@@ -27,6 +27,12 @@ before a public challenge submission.
   focus order, screen-reader names/status updates, error announcements, image
   alternatives, and 360px layout in a real browser with an available
   assistive technology. Record browser, OS, tool, date, and result.
+- [ ] **Production services**: configure PostgreSQL, Redis/RQ, private object
+  storage, authentication, distributed rate limiting, backups, and deletion
+  verification. Local mode is not production-ready.
+- [ ] **Privacy operations**: publish the privacy and retention policy, verify
+  report deletion removes source/artifact data, and restrict audit logs to
+  authorized operators.
 
 ## Local release commands
 

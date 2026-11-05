@@ -1,7 +1,9 @@
 import io
 
+import pytest
 from PIL import Image
 
+from app import fixtures
 from app.analysis import analyze_bytes
 from app.config import settings
 
@@ -26,3 +28,16 @@ def test_large_accepted_image_is_downscaled_for_analysis(monkeypatch):
     assert report.provenance["analysis_dimensions"] == [1024, 683]
     assert report.provenance["analysis_resized"] is True
     assert any("downscaled" in item for item in report.limitations)
+
+
+@pytest.mark.parametrize("transform", [
+    fixtures.cropped,
+    fixtures.resized,
+    fixtures.screenshot,
+    fixtures.messaging_copy,
+])
+def test_real_world_transform_examples_remain_analyzable(transform):
+    raw = fixtures.to_jpeg_bytes(transform(fixtures.scene(7)), 90)
+    report = analyze_bytes(raw)
+    assert report.uncertainty["level"] in {"high", "moderate"}
+    assert report.analysis_metrics["total_ms"] >= 0

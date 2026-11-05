@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -144,10 +145,28 @@ def _metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
     tn = sum(not a and not p for a, p in zip(actual, predicted))
     fp = sum(not a and p for a, p in zip(actual, predicted))
     fn = sum(a and not p for a, p in zip(actual, predicted))
+    def wilson(successes: int, total: int) -> list[float] | None:
+        if not total:
+            return None
+        z = 1.96
+        p = successes / total
+        denominator = 1 + z * z / total
+        centre = (p + z * z / (2 * total)) / denominator
+        margin = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator
+        return [round(max(0.0, centre - margin), 4), round(min(1.0, centre + margin), 4)]
+
+    accuracy = tp + tn
+    precision = tp
+    recall = tp
     return {
         "accuracy": round((tp + tn) / len(actual), 4) if actual else None,
         "precision": round(tp / (tp + fp), 4) if tp + fp else None,
         "recall": round(tp / (tp + fn), 4) if tp + fn else None,
+        "confidence_intervals_95": {
+            "accuracy": wilson(accuracy, len(actual)),
+            "precision": wilson(precision, tp + fp),
+            "recall": wilson(recall, tp + fn),
+        },
         "confusion_matrix": {
             "true_positive": tp,
             "true_negative": tn,
@@ -163,11 +182,27 @@ def evaluate(manifest_path: Path, output_path: Path) -> dict[str, Any]:
     observations: list[dict[str, Any]] = []
     failed_count = 0
     seen_ids: set[str] = set()
+    group_splits: dict[str, str] = {}
+    hash_splits: dict[str, str] = {}
     for index, raw_item in enumerate(manifest["samples"]):
         item, path = _validate_sample(raw_item, index, dataset_root)
         if item["id"] in seen_ids:
             raise DatasetError(f"Duplicate sample id: {item['id']}")
         seen_ids.add(item["id"])
+        group_id = item.get("group_id", item.get("derived_from", item["id"]))
+        previous_split = group_splits.setdefault(group_id, item["split"])
+        if previous_split != item["split"]:
+            raise DatasetError(
+                f"Source group {group_id} appears in both {previous_split} and {item['split']} splits."
+            )
+        if path.is_file():
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            previous_hash_split = hash_splits.setdefault(digest, item["split"])
+            if previous_hash_split != item["split"]:
+                raise DatasetError(
+                    f"Duplicate file content appears in both {previous_hash_split} and "
+                    f"{item['split']} splits."
+                )
         observation = {
             "id": item["id"],
             "path": item["path"],
@@ -181,7 +216,7 @@ def evaluate(manifest_path: Path, output_path: Path) -> dict[str, Any]:
             "download_date": item["download_date"],
             "modification_history": item["modification_history"],
             "split": item["split"],
-            "group_id": item.get("group_id", item.get("derived_from", item["id"])),
+            "group_id": group_id,
         }
         try:
             if not path.is_file():
@@ -229,6 +264,7 @@ def evaluate(manifest_path: Path, output_path: Path) -> dict[str, Any]:
         "sample_count": len(observations),
         "successful_count": len(successful),
         "failed_count": failed_count,
+        "source_group_count": len({item["group_id"] for item in observations}),
         "source_counts": dict(sorted(by_source.items())),
         "metrics": _metrics(successful),
         "per_class": per_class,

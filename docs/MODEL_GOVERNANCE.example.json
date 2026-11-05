@@ -1,0 +1,13 @@
+{
+  "artifact_sha256": "replace-with-sha256",
+  "upstream_url": "https://example.org/model",
+  "revision": "immutable-release-or-commit",
+  "author": "model author or organization",
+  "model_license": "license identifier and URL",
+  "dataset_license": "dataset license identifier and URL",
+  "redistribution_permission": false,
+  "intended_use": "Evidence signal only; not a standalone authenticity verdict",
+  "known_limitations": [
+    "Requires held-out calibration and cross-source evaluation"
+  ]
+}

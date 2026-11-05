@@ -10,6 +10,7 @@ import hashlib
 import io
 import math
 import secrets
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
@@ -398,6 +399,25 @@ def _collect_limitations(signals: list[Signal]) -> list[str]:
     return list(dict.fromkeys(item for s in signals for item in s.limitations))
 
 
+def _uncertainty(signals: list[Signal], tier: str) -> dict[str, Any]:
+    determined = [signal for signal in signals if signal.strength != "not_determined"]
+    families = {signal.family for signal in determined}
+    if len(determined) < 2:
+        level = "high"
+        reason = "Fewer than two signal families produced a determined result."
+    elif tier == INCONCLUSIVE:
+        level = "high"
+        reason = "The quality gate or signal disagreement limits interpretation."
+    elif len(families) < 2:
+        level = "moderate"
+        reason = "The result is supported by only one signal family."
+    else:
+        level = "moderate"
+        reason = "Multiple families contributed, but forensic signals are not proof of origin."
+    return {"level": level, "determined_signals": len(determined),
+            "determined_families": len(families), "reason": reason}
+
+
 def _explanation_input(tier, rule, signals, limitations, extra=None) -> dict:
     payload = {
         "tier": tier,
@@ -412,16 +432,19 @@ def _explanation_input(tier, rule, signals, limitations, extra=None) -> dict:
 
 
 def _report(report_id, tier, rule, signals, provenance_data, limitations,
-            explanation, source, demo, known_matches=None, frame_thumbnails=None) -> Report:
+            explanation, source, demo, known_matches=None, frame_thumbnails=None,
+            analysis_metrics=None) -> Report:
     return Report(report_id=report_id, tier=tier, applied_rule=rule, signals=signals,
                   provenance=provenance_data, known_item_matches=known_matches or [], limitations=limitations,
                   explanation=explanation, explanation_source=source,
                   heatmaps=_heatmaps(signals),
                   frame_thumbnails=frame_thumbnails or [],
-                  reverse_search=[dict(item) for item in REVERSE_SEARCH], demo=demo)
+                  reverse_search=[dict(item) for item in REVERSE_SEARCH], demo=demo,
+                  analysis_metrics=analysis_metrics or {}, uncertainty=_uncertainty(signals, tier))
 
 
-def _analyze_image(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
+def _analyze_image(raw: bytes, report_id: str, stem: str, demo: bool,
+                   started_at: float | None = None) -> Report:
     media.check_image_header(raw)
     try:
         image = Image.open(io.BytesIO(raw))
@@ -450,8 +473,10 @@ def _analyze_image(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
     provenance_data["analysis_dimensions"] = list(analysis_image.size)
     provenance_data["analysis_resized"] = resized
     provenance_data["c2pa"] = c2pa.inspect_bytes(raw, ".jpg")
+    metrics = {"total_ms": round((time.perf_counter() - started_at) * 1000, 2)} if started_at else {}
     return _report(report_id, tier, rule, signals, provenance_data, limitations,
-                   explanation, source, demo, known_matches=known_items.match(analysis_image))
+                   explanation, source, demo, known_matches=known_items.match(analysis_image),
+                   analysis_metrics=metrics)
 
 
 @dataclass(frozen=True)
@@ -524,7 +549,8 @@ def _frame_thumbnails(frames: list[_FrameResult], stem: str) -> list[dict[str, s
     return thumbnails
 
 
-def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
+def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool,
+                   started_at: float | None = None) -> Report:
     frames: list[_FrameResult] = []
     heatmap_names: set[str] = set()
     info: video.VideoInfo | None = None
@@ -579,8 +605,10 @@ def _analyze_video(raw: bytes, report_id: str, stem: str, demo: bool) -> Report:
         tier, rule, chosen, limitations,
         extra={"frames": {"analysed": len(frames), "strong": strong_frames, "threshold": threshold}},
     ))
+    metrics = {"total_ms": round((time.perf_counter() - started_at) * 1000, 2)} if started_at else {}
     return _report(report_id, tier, rule, chosen, provenance_data, limitations,
-                   explanation, source, demo, frame_thumbnails=frame_thumbnails)
+                   explanation, source, demo, frame_thumbnails=frame_thumbnails,
+                   analysis_metrics=metrics)
 
 
 def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Report:
@@ -591,6 +619,7 @@ def analyze_bytes(raw: bytes, *, demo: bool = False, name: str = "upload") -> Re
     media.check_size(raw, media_type)
     report_id = secrets.token_urlsafe(24)
     stem = hashlib.sha256(raw).hexdigest()[:16]
+    started_at = time.perf_counter()
     if media_type == "video":
-        return _analyze_video(raw, report_id, stem, demo)
-    return _analyze_image(raw, report_id, stem, demo)
+        return _analyze_video(raw, report_id, stem, demo, started_at)
+    return _analyze_image(raw, report_id, stem, demo, started_at)

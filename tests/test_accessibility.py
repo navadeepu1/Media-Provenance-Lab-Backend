@@ -10,8 +10,11 @@ def test_keyboard_accessible_controls_and_focus_styles():
     assert '<html lang="en">' in html
     assert 'for="file"' in html and 'id="file"' in html
     assert 'id="upload-form"' in html
+    assert "Analysis starts only after you select a local file." in html
     assert ":focus-visible" in css
     assert "aria-live" in html
+    assert 'role="alert"' in html
+    assert 'id="cancel-analysis"' in html
 
 
 def test_360px_layout_prevents_horizontal_media_overflow():
@@ -26,3 +29,6 @@ def test_report_rendering_escapes_text_and_uses_alt_text():
     assert "function escapeHtml" in js
     assert 'alt="${escapeHtml' in js
     assert 'role="status"' in js
+    assert "readJson" in js
+    assert "showError" in js
+    assert "uncertainty" in js

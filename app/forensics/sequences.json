@@ -1,0 +1,12 @@
+[
+  {
+    "id": "SEQ-ACCESS-CHAIN",
+    "title": "Possible access escalation sequence",
+    "steps": [
+      {"action": "logon_success", "max_gap_minutes": 30},
+      {"action": "privilege_granted", "max_gap_minutes": 30},
+      {"action": ["file_read", "file_delete"], "max_gap_minutes": 30},
+      {"action": "network_connection", "max_gap_minutes": 30}
+    ]
+  }
+]

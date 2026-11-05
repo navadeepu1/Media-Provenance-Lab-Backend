@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, create_engine, select
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, create_engine, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from .config import settings
@@ -26,6 +26,10 @@ class JobRow(Base):
     demo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ReportRow(Base):
@@ -61,7 +65,8 @@ def _engine():
     url = settings.database_url
     if url.startswith("sqlite:///"):
         Path(url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    return create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
+    return create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {},
+                         pool_pre_ping=True)
 
 
 engine = _engine()
@@ -69,7 +74,37 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def init_db() -> None:
+    from .privacy import AuditRow, ReviewRow  # noqa: F401
+    from . import forensics  # noqa: F401
+    from .forensics import persistence  # noqa: F401
     Base.metadata.create_all(engine)
+    if engine.dialect.name == "sqlite":
+        columns = {column["name"] for column in inspect(engine).get_columns("jobs")}
+        migrations = {
+            "deadline_at": "DATETIME",
+            "cancel_requested": "BOOLEAN NOT NULL DEFAULT 0",
+            "started_at": "DATETIME",
+            "duration_ms": "FLOAT",
+        }
+        with engine.begin() as connection:
+            for name, definition in migrations.items():
+                if name not in columns:
+                    connection.execute(text(f"ALTER TABLE jobs ADD COLUMN {name} {definition}"))
+            if "owner_id" not in {column["name"] for column in inspect(engine).get_columns("forensic_cases")}:
+                connection.execute(text("ALTER TABLE forensic_cases ADD COLUMN owner_id VARCHAR(120) NOT NULL DEFAULT 'local-user'"))
+            custody_columns = {column["name"] for column in inspect(engine).get_columns("custody_entries")}
+            if "payload" not in custody_columns:
+                connection.execute(text("ALTER TABLE custody_entries ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'"))
+        Base.metadata.create_all(engine)
+
+
+def healthcheck() -> str:
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return "ok"
+    except Exception:
+        return "unavailable"
 
 
 def _now() -> datetime:
@@ -87,9 +122,10 @@ def recover_interrupted_jobs() -> int:
         return len(rows)
 
 
-def create_job(job_id: str, raw_path: Path, demo: bool) -> None:
+def create_job(job_id: str, raw_path: Path, demo: bool, deadline_at: datetime) -> None:
     with SessionLocal.begin() as session:
-        session.add(JobRow(id=job_id, raw_path=str(raw_path), demo=demo))
+        session.add(JobRow(id=job_id, raw_path=str(raw_path), demo=demo,
+                           deadline_at=deadline_at))
 
 
 def update_job(job_id: str, **values: Any) -> None:
@@ -106,7 +142,39 @@ def job_dict(job_id: str) -> dict[str, Any] | None:
         if not row:
             return None
         return {key: getattr(row, key) for key in
-                ("id", "status", "current_module", "progress", "report_id", "error_code", "error_message")}
+                ("id", "status", "current_module", "progress", "report_id", "error_code",
+                 "error_message", "cancel_requested", "deadline_at", "started_at", "duration_ms")}
+
+
+def request_job_cancellation(job_id: str) -> bool:
+    with SessionLocal.begin() as session:
+        row = session.get(JobRow, job_id)
+        if not row or row.status not in ("queued", "running"):
+            return False
+        row.cancel_requested = True
+        return True
+
+
+def job_cancel_requested(job_id: str) -> bool:
+    with SessionLocal() as session:
+        row = session.get(JobRow, job_id)
+        return bool(row and row.cancel_requested)
+
+
+def expire_overdue_jobs() -> int:
+    now = _now()
+    with SessionLocal.begin() as session:
+        rows = session.scalars(select(JobRow).where(
+            JobRow.status.in_(("queued", "running")),
+            JobRow.deadline_at.is_not(None),
+            JobRow.deadline_at <= now,
+        )).all()
+        for row in rows:
+            row.status = "failed"
+            row.error_code = "timeout"
+            row.error_message = "Analysis exceeded its time budget."
+            row.finished_at = now
+        return len(rows)
 
 
 def save_report(report: dict[str, Any], job_id: str) -> None:
@@ -132,6 +200,21 @@ def load_report(report_id: str) -> dict[str, Any] | None:
         if not row or row.expires_at <= _now():
             return None
         return json.loads(row.payload)
+
+
+def delete_report(report_id: str) -> bool:
+    with SessionLocal.begin() as session:
+        row = session.get(ReportRow, report_id)
+        if not row:
+            return False
+        job = session.get(JobRow, row.job_id)
+        if job:
+            path = Path(job.raw_path)
+            if path.is_file():
+                path.unlink()
+            session.delete(job)
+        session.delete(row)
+        return True
 
 
 def cleanup_expired() -> dict[str, int]:

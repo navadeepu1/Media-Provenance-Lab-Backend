@@ -5,6 +5,10 @@ video provenance signals. It does not claim that a file is definitively
 “real” or “fake”. Instead, it combines several explainable signals and reports
 an evidence tier, limitations, and supporting heatmaps.
 
+For a detailed description of the application, its users, capabilities,
+workflow, API surface, advantages, architecture, and limitations, see the
+[Application and Digital Forensics Guide](docs/APPLICATION_GUIDE.md).
+
 The prototype is suitable for local demonstration. A hosted deployment,
 provider API key, external dataset, and learned detector are **not required**
 to run the basic application.
@@ -25,6 +29,25 @@ The application can:
 - export a completed report as offline HTML;
 - evaluate labeled images through a manifest;
 - generate reproducible derived examples for evaluation.
+- create offline investigation cases for JSON/JSONL, CSV, plain-text logs, and
+  filesystem-metadata evidence;
+- normalize imported records into a searchable investigation timeline;
+- retain SHA-256 evidence hashes and verify a per-evidence tamper-evident
+  chain-of-custody log;
+- answer local investigation questions with citations back to timeline events.
+- flag privilege, destructive, authentication-failure, and access activity
+  with deterministic findings tied to source events;
+- import Chromium-style browser history SQLite databases and application/access
+  records;
+- optionally enforce case ownership with `AUTHENTICATION_BACKEND=local_bearer`
+  and `AUTH_TOKENS=username:token` pairs;
+- anchor custody tips to a separately retained local file and detect changes
+  during verification.
+
+The investigation assistant is intentionally deterministic in the offline
+mode: it retrieves matching imported events and returns their identifiers
+instead of inventing an incident narrative. An external AI provider can be
+added later only with an explicit privacy and deployment decision.
 
 The optional ONNX learned detector is disabled unless a verified local model is
 configured. If it is unavailable or fails, the result is reported as
@@ -193,7 +216,9 @@ environment interpreter explicitly:
    - individual ELA, noise, copy-move, provenance, and detector signals;
    - limitations and `not_determined` statuses;
    - heatmaps and strongest video frames, when available.
-6. Open the report export to download an offline HTML copy.
+   - uncertainty level, determined signal/family counts, and analysis time.
+6. Cancel a running analysis from the progress panel if it is no longer needed.
+7. Open the report export to download an offline HTML copy.
 
 The report is evidence-oriented. A strong signal is not proof of manipulation,
 and an authentic image may contain compression or editing artifacts.
@@ -209,9 +234,23 @@ The browser uses the same-origin FastAPI API. The main endpoints are:
 | `POST` | `/api/v1/analyze` | Start an uploaded file analysis |
 | `POST` | `/api/v1/samples/{id}/analyze` | Analyze a built-in sample |
 | `GET` | `/api/v1/jobs/{id}` | Poll asynchronous job progress |
+| `POST` | `/api/v1/jobs/{id}/cancel` | Request cancellation of a queued/running job |
 | `GET` | `/api/v1/reports/{id}` | Read a completed JSON report |
 | `GET` | `/api/v1/reports/{id}/export` | Download offline HTML |
 | `GET` | `/api/v1/methodology` | Read rules and limitations |
+| `GET` | `/api/v1/ready` | Check database, queue, and storage readiness |
+| `GET` | `/api/v1/capabilities` | Report the configured status of advanced capabilities |
+| `POST` | `/api/v1/reports/{id}/reviews` | Create a local human-review task |
+| `POST` | `/api/v1/cases` | Create an offline investigation case |
+| `GET` | `/api/v1/cases` | List local investigation cases |
+| `POST` | `/api/v1/cases/{id}/evidence` | Import JSON, CSV, text-log, or filesystem-metadata evidence |
+| `GET` | `/api/v1/cases/{id}/timeline` | Read normalized timeline events |
+| `GET` | `/api/v1/cases/{id}/findings` | Read deterministic suspicious-activity findings |
+| `POST` | `/api/v1/cases/{id}/assistant` | Ask an evidence-grounded local question |
+| `GET` | `/api/v1/cases/{id}/custody/verify` | Verify the evidence custody hash chain |
+| `POST` | `/api/v1/cases/{id}/custody/anchor` | Anchor current custody tips to the configured local anchor file |
+| `PATCH` | `/api/v1/reviews/{id}` | Update a local human-review task |
+| `DELETE` | `/api/v1/reports/{id}` | Request report deletion |
 
 Quick health check from PowerShell:
 
@@ -230,6 +269,14 @@ curl.exe -X POST `
 
 The response contains a job ID. Poll the job endpoint until it is complete,
 then request the report endpoint using the returned report ID.
+
+Jobs have a durable deadline (`JOB_BUDGET_SECONDS`, 90 seconds by default).
+Timeouts and cancellation requests are persisted in SQLite, survive a process
+restart as explicit failures, and never produce a success-shaped report.
+Each completed report includes `analysis_metrics.total_ms`; structured JSON
+events are emitted for queueing, completion, rejection, cancellation, timeout,
+recovery, and cleanup. The browser reports uncertainty separately from the
+evidence tier because a tier is not a probability of authenticity.
 
 ## 10. Run the automated tests
 

@@ -75,6 +75,30 @@ def forwarded(image: Image.Image) -> Image.Image:
     return recompress(image, quality=65)
 
 
+def cropped(image: Image.Image) -> Image.Image:
+    """A common social-media crop that removes a small border."""
+    width, height = image.size
+    return image.crop((width // 12, height // 12, width - width // 12, height - height // 12))
+
+
+def resized(image: Image.Image) -> Image.Image:
+    """A downscale/upscale round trip used by messaging and web pipelines."""
+    smaller = image.resize((320, 240), Image.Resampling.LANCZOS)
+    return smaller.resize(image.size, Image.Resampling.BICUBIC)
+
+
+def screenshot(image: Image.Image) -> Image.Image:
+    """Approximate a screenshot: RGB rasterization followed by web JPEG export."""
+    return recompress(image.convert("RGB"), quality=82)
+
+
+def messaging_copy(image: Image.Image) -> Image.Image:
+    """Approximate a messaging-app copy with a 1280px cap and moderate JPEG quality."""
+    result = image.copy()
+    result.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+    return recompress(result, quality=68)
+
+
 def short_video_bytes(seed: int = 1) -> bytes:
     """Three seconds at 10 fps. Frames from the second half carry a copied patch."""
     base = np.asarray(scene(seed, size=VIDEO_SIZE), dtype=np.uint8)[:, :, ::-1].copy()  # RGB to BGR

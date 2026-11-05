@@ -5,6 +5,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_env: str = "development"
     database_url: str = "sqlite:///./data/mpl.db"
+    queue_backend: str = "inline"
+    redis_url: str = ""
+    storage_backend: str = "local"
+    storage_root: Path = Path("data")
+    authentication_backend: str = "none"
+    auth_tokens: str = ""
+    custody_anchor_path: Path = Path("data/custody-anchors.json")
+    custody_hmac_key: str = ""
+    privacy_retention_days: int = 30
+    audit_retention_days: int = 365
     admin_api_key: str = ""
     ai_provider: str = "none"
     gemini_api_key: str = ""
@@ -17,6 +27,7 @@ class Settings(BaseSettings):
     detector_sha256: str = "C58229F69570BE40698120B31DEFD985C63904575BAACFFAD1A7866FDA6EFCC5"
     detector_calibration_path: str = ""
     job_budget_seconds: int = 90
+    job_poll_interval_seconds: float = 0.25
     max_image_bytes: int = 10 * 1024 * 1024
     max_video_bytes: int = 25 * 1024 * 1024
     max_pixels: int = 16_000_000

@@ -95,3 +95,28 @@ def test_invalid_media_is_recorded_without_stopping_other_samples(tmp_path):
     assert result["successful_count"] == 1
     assert result["failed_count"] == 1
     assert result["observations"][1]["status"] == "error"
+
+
+def test_source_group_cannot_cross_splits(tmp_path):
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["samples"].append({**payload["samples"][0], "id": "photo-2", "split": "train",
+                               "path": "photo.jpg", "group_id": "shared-source"})
+    payload["samples"][0]["group_id"] = "shared-source"
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DatasetError, match="appears in both"):
+        evaluate(manifest, tmp_path / "out.json")
+
+
+def test_metrics_include_confidence_intervals(tmp_path):
+    result = evaluate(_manifest(tmp_path), tmp_path / "out.json")
+    assert result["metrics"]["confidence_intervals_95"]["accuracy"] is not None
+
+
+def test_duplicate_file_content_cannot_cross_splits(tmp_path):
+    manifest = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["samples"].append({**payload["samples"][0], "id": "photo-2", "split": "train"})
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(DatasetError, match="Duplicate file content"):
+        evaluate(manifest, tmp_path / "out.json")

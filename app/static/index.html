@@ -1,17 +1,113 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Media Provenance Lab</title><link rel="stylesheet" href="/static/styles.css"></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Media Provenance Lab | Investigation Workspace</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
 <body>
 <main>
-<header><p class="eyebrow">Media Provenance Lab</p><h1>Evidence, not verdicts.</h1>
-<p>Inspect a photo or short video with provenance context and pixel-forensic signals. The report never labels media as “fake” or “real.”</p></header>
-<section aria-labelledby="samples-heading"><h2 id="samples-heading">Try a synthetic demo</h2><div id="samples" class="cards"></div></section>
-<section aria-labelledby="upload-heading"><h2 id="upload-heading">Upload media</h2>
-<form id="upload-form"><label for="file">JPEG, PNG, WebP, or MP4 (up to 25 MB)</label><input id="file" name="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4" required><button>Analyze upload</button></form></section>
-<section id="progress" hidden aria-live="polite"><h2>Analysis progress</h2><p id="progress-text"></p><progress id="progress-bar" max="100" value="0"></progress></section>
-<section id="report" hidden aria-labelledby="report-heading"><h2 id="report-heading">Evidence report</h2><div id="report-content"></div></section>
-<footer><a href="/api/v1/methodology">Methodology and metrics</a></footer>
-</main><script src="/static/app.js"></script>
-</body></html>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">Media Provenance Lab</p>
+      <h1>Evidence, not verdicts.</h1>
+      <p>Analyze media and reconstruct suspicious activity in a cited, human-reviewed investigation workspace.</p>
+    </div>
+    <div class="health" id="health-status" role="status">Checking services…</div>
+  </header>
 
+  <div id="error-message" class="error" role="alert" hidden></div>
+  <div id="case-status" class="notice" role="status" hidden></div>
+
+  <nav class="stepper" aria-label="Investigation workflow">
+    <a class="step active" href="#step-media"><span>1</span><strong>Media</strong><small>Optional provenance analysis</small></a>
+    <a class="step" href="#step-case"><span>2</span><strong>Case</strong><small>Create or select a case</small></a>
+    <a class="step" href="#step-evidence"><span>3</span><strong>Evidence</strong><small>Import source records</small></a>
+    <a class="step" href="#step-review"><span>4</span><strong>Review</strong><small>Timeline and findings</small></a>
+    <a class="step" href="#step-close"><span>5</span><strong>Close</strong><small>Custody and decisions</small></a>
+  </nav>
+
+  <section id="step-media" class="workflow-card" aria-labelledby="media-heading">
+    <div class="section-heading"><span class="step-number">1</span><div><h2 id="media-heading">Analyze media <em>optional</em></h2><p>Inspect images and short videos without sending them to an external provider.</p></div></div>
+    <p>Analysis starts only after you select a local file.</p>
+    <form id="upload-form" class="inline-form">
+      <label for="file">JPEG, PNG, WebP, or MP4 (up to 25 MB)</label>
+      <input id="file" name="file" type="file" accept="image/jpeg,image/png,image/webp,video/mp4" required>
+      <button type="submit">Analyze upload</button>
+    </form>
+    <div id="progress" hidden aria-live="polite"><p id="progress-text"></p><progress id="progress-bar" max="100" value="0"></progress><button id="cancel-analysis" type="button" class="secondary">Cancel analysis</button></div>
+    <section id="report" hidden aria-labelledby="report-heading"><h3 id="report-heading">Media report</h3><div id="report-content"></div></section>
+  </section>
+
+  <section id="step-case" class="workflow-card" aria-labelledby="case-heading">
+    <div class="section-heading"><span class="step-number">2</span><div><h2 id="case-heading">Create or select a case</h2><p>Cases keep evidence, findings, decisions, notes, and custody records together.</p></div></div>
+    <div class="two-column">
+      <form id="case-form">
+        <label for="case-title">New case title</label><input id="case-title" required maxlength="200" placeholder="Suspected account compromise">
+        <button type="submit">Create case</button>
+      </form>
+      <div>
+        <label for="case-select">Active case</label>
+        <select id="case-select"><option value="">Create or select a case</option></select>
+        <div id="case-summary" class="summary" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="step-evidence" class="workflow-card locked" aria-labelledby="evidence-heading">
+    <div class="section-heading"><span class="step-number">3</span><div><h2 id="evidence-heading">Import and preserve evidence</h2><p>Upload a source file, select its parser, and retain its SHA-256 identity.</p></div></div>
+    <form id="evidence-form" class="two-column">
+      <div><label for="evidence-kind">Evidence parser</label><select id="evidence-kind">
+        <option value="json">JSON / JSONL</option><option value="csv">CSV</option><option value="linux_auth">Linux authentication</option>
+        <option value="web_access">Web access log</option><option value="windows_xml">Windows event XML</option>
+        <option value="firefox_history">Firefox history</option>
+      </select></div>
+      <div><label for="evidence-file">Evidence file</label><input id="evidence-file" type="file" required></div>
+      <button type="submit">Import evidence</button>
+    </form>
+    <div class="toolbar"><h3>Evidence register</h3><button id="refresh-evidence" class="secondary" type="button">Refresh</button></div>
+    <div id="evidence-list" class="report-table"><p>No evidence imported yet.</p></div>
+  </section>
+
+  <section id="step-review" class="workflow-card locked" aria-labelledby="review-heading">
+    <div class="section-heading"><span class="step-number">4</span><div><h2 id="review-heading">Investigate the activity</h2><p>Filter normalized events, inspect deterministic findings, and record your review.</p></div></div>
+    <div class="filters">
+      <div><label for="filter-actor">Actor</label><input id="filter-actor" placeholder="alice"></div>
+      <div><label for="filter-host">Host</label><input id="filter-host" placeholder="host-01"></div>
+      <div><label for="filter-source">Source type</label><input id="filter-source" placeholder="linux_auth"></div>
+      <div><label for="filter-action">Action</label><select id="filter-action"><option value="">Any action</option><option>logon_failure</option><option>logon_success</option><option>privilege_used</option><option>file_read</option><option>file_delete</option><option>web_visit</option></select></div>
+      <button id="apply-filters" type="button">Apply filters</button>
+    </div>
+    <div class="toolbar"><h3>Normalized timeline</h3><span id="timeline-count" class="muted"></span></div>
+    <div id="timeline" class="report-table"><p>Import evidence to populate the timeline.</p></div>
+    <button id="load-more" class="secondary" type="button" hidden>Load next page</button>
+
+    <div class="review-grid">
+      <section><div class="toolbar"><h3>Suspicious-activity findings</h3><button id="refresh-findings" class="secondary" type="button">Refresh</button></div><div id="findings-list"><p>No findings loaded.</p></div></section>
+      <section><h3>Incidents</h3><div id="incidents-list"><p>No incidents loaded.</p></div></section>
+    </div>
+  </section>
+
+  <section id="step-close" class="workflow-card locked" aria-labelledby="close-heading">
+    <div class="section-heading"><span class="step-number">5</span><div><h2 id="close-heading">Document and close the review</h2><p>Capture investigator context, verify custody, and move the case through its lifecycle.</p></div></div>
+    <div class="review-grid">
+      <section><h3>Notes and tags</h3>
+        <form id="note-form"><label for="note-text">Investigator note</label><textarea id="note-text" rows="3" maxlength="10000" required></textarea><button type="submit">Add note</button></form>
+        <form id="tag-form" class="inline-form"><label for="tag-name">Controlled tag</label><input id="tag-name" pattern="[A-Za-z0-9_.:-]+" maxlength="80" required placeholder="priority"><button type="submit">Add tag</button></form>
+        <div id="notes-tags"></div>
+      </section>
+      <section><h3>Custody and case status</h3>
+        <button id="verify-custody" type="button">Verify custody chain</button><p id="custody-status" role="status" class="notice"></p>
+        <label for="case-status-select">Case status</label><select id="case-status-select"><option value="open">Open</option><option value="in_review">In review</option><option value="closed">Closed</option></select>
+        <label for="status-reason">Reason when reopening</label><input id="status-reason" maxlength="2000" placeholder="Required for closed → open">
+        <button id="update-case-status" type="button">Save case status</button>
+      </section>
+    </div>
+    <div class="toolbar"><h3>Bookmarked evidence</h3><div id="bookmarks-list"><p>No bookmarks yet.</p></div></div>
+  </section>
+  <footer><a href="/api/v1/methodology">Methodology and metrics</a> · <a href="/docs" target="_blank" rel="noopener">API documentation</a></footer>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

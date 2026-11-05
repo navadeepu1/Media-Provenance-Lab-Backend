@@ -32,6 +32,8 @@ class Report(BaseModel):
     heatmaps: list[dict[str, str]]
     frame_thumbnails: list[dict[str, str]] = Field(default_factory=list)
     reverse_search: list[dict[str, str]]
+    analysis_metrics: dict[str, float] = Field(default_factory=dict)
+    uncertainty: dict[str, Any] = Field(default_factory=dict)
     demo: bool = False
 
 

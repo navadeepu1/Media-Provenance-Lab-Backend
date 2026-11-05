@@ -16,3 +16,9 @@ Calibration is implemented by `scripts/calibrate_detector.py` and requires a
 licensed held-out CSV with `score,label` columns. No calibration file is enabled
 by default, and the detector remains excluded from fusion tiers until measured
 validation results are recorded.
+
+Before distribution, run `python scripts/check_model_governance.py
+model_int8.onnx docs/MODEL_GOVERNANCE.json` with a completed governance record.
+The verifier rejects missing provenance, missing redistribution permission, URL
+metadata that is not HTTP(S), and checksum mismatches. The example record is
+deliberately non-verifying and must not be copied as release evidence.
